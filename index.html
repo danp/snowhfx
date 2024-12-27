@@ -1,1 +1,143 @@
-hello
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Halifax Sidewalk Snow Clearing</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    /* Ensure the map is fully responsive */
+    #map {
+      width: 100%;
+      height: 90vh;
+    }
+
+    /* Header for priorities */
+    .header {
+      padding: 10px;
+      background-color: #f4f4f4;
+      border-bottom: 1px solid #ddd;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .priority-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .priority-square {
+      width: 30px;
+      height: 30px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-weight: bold;
+      font-size: 16px;
+      color: white;
+      border-radius: 4px;
+    }
+
+    .priority-1 .priority-square {
+      background-color: #D55E00;
+    }
+
+    .priority-2 .priority-square {
+      background-color: #E69F00;
+    }
+
+    .priority-3 .priority-square {
+      background-color: #F7C843;
+    }
+
+    .priority-deadline {
+      font-size: 14px;
+      color: #333;
+    }
+  </style>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+</head>
+<body>
+  <div class="header" id="priorities-header"></div>
+  <div id="map"></div>
+
+  <script>
+    // Initialize the map
+    var map = L.map('map');
+
+    // Add a basemap (OpenStreetMap)
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Define a function to style the GeoJSON features
+    function getStyle(feature) {
+      const colors = {
+        '1': '#D55E00', // High priority: Dark Orange
+        '2': '#E69F00', // Medium priority: Medium Orange
+        '3': '#F7C843'  // Low priority: Light Orange
+      };
+
+      return {
+        color: colors[feature.properties.priority] || '#CCCCCC', // Default to grey
+        weight: 6,
+        opacity: 1
+      };
+    }
+
+    // Format the deadline to show weekday and time (e.g., Wed 3:30 PM)
+    function formatDeadline(deadline) {
+      const deadlineDate = new Date(deadline);
+      return deadlineDate.toLocaleString('en-US', {
+        weekday: 'short',
+        hour: 'numeric',
+        minute: '2-digit'
+      });
+    }
+
+    // Load GeoJSON data
+    fetch('data.geojson')
+      .then(response => response.json())
+      .then(data => {
+        // Add GeoJSON to the map
+        var geojsonLayer = L.geoJSON(data, {
+          style: getStyle,
+          onEachFeature: function(feature, layer) {
+            layer.bindPopup(`
+              ${feature.properties.title || 'Unknown'}<br>
+              <strong>Priority:</strong> ${feature.properties.priority || 'Unknown'}<br>
+              <strong>Deadline:</strong> ${feature.properties.deadline || 'Unknown'}<br>
+              <strong>Timeline:</strong> ${feature.properties.timeline || 'Unknown'}
+            `);
+          }
+        }).addTo(map);
+
+        // Auto-center map to the GeoJSON layer
+        map.fitBounds(geojsonLayer.getBounds());
+      })
+      .catch(error => console.error('Error loading GeoJSON:', error));
+
+    // Load priorities.json
+    fetch('priorities.json')
+      .then(response => response.json())
+      .then(priorities => {
+        const prioritiesHeader = document.getElementById('priorities-header');
+
+        // Generate horizontal list of priorities
+        prioritiesHeader.innerHTML = Object.entries(priorities)
+          .map(([priority, details]) => `
+            <div class="priority-item priority-${priority}">
+              <div class="priority-square">${priority}</div>
+              <div class="priority-deadline">${formatDeadline(details.Deadline)}</div>
+            </div>
+          `)
+          .join('');
+      })
+      .catch(error => console.error('Error loading priorities:', error));
+  </script>
+</body>
+</html>
