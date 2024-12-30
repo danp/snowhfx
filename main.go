@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"slices"
@@ -13,7 +16,6 @@ import (
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
-	"github.com/paulmach/orb/planar"
 )
 
 const activeTravelwaysDownloadURL = `https://hub.arcgis.com/api/download/v1/items/a3631c7664ef4ecb93afb1ea4c12022b/geojson?redirect=false&layers=0&spatialRefId=4326`
@@ -38,13 +40,14 @@ func main() {
 	}
 
 	type priority struct {
+		Number   int
 		Timeline time.Duration
 		Deadline time.Time
 	}
 	priorities := map[string]priority{
-		"1": {12 * time.Hour, endTime.Add(12 * time.Hour)},
-		"2": {18 * time.Hour, endTime.Add(18 * time.Hour)},
-		"3": {36 * time.Hour, endTime.Add(36 * time.Hour)},
+		"1": {1, 12 * time.Hour, endTime.Add(12 * time.Hour)},
+		"2": {2, 18 * time.Hour, endTime.Add(18 * time.Hour)},
+		"3": {3, 36 * time.Hour, endTime.Add(36 * time.Hour)},
 	}
 
 	resp, err := http.Get(activeTravelwaysDownloadURL)
@@ -82,13 +85,7 @@ func main() {
 	}
 
 	fc.Features = slices.DeleteFunc(fc.Features, func(f *geojson.Feature) bool {
-		if f.Properties["WINT_LOS"] == nil {
-			return true
-		}
-		if !isPolygonInsidePolygon(peninsulaPolygon.Geometry().(orb.Polygon), f.Geometry) {
-			return true
-		}
-		return false
+		return f.Properties["WINT_LOS"] == nil
 	})
 	for _, f := range fc.Features {
 		props := f.Properties
@@ -101,17 +98,16 @@ func main() {
 		}
 
 		f.Properties["title"] = props["LOCATION"]
-		f.Properties["priority"] = priorityNum
+		f.Properties["priority"] = p.Number
 		f.Properties["timeline"] = fmt.Sprintf("%d hours", int(p.Timeline.Hours()))
 		f.Properties["deadline"] = p.Deadline.Format("Mon 3:04 PM")
 	}
 
-	b, err = json.Marshal(fc)
-	if err != nil {
+	var out bytes.Buffer
+	if err := encodeFeatures(fc.Features, &out); err != nil {
 		log.Fatal(err)
 	}
-
-	if err := os.WriteFile("data.geojson", b, 0644); err != nil {
+	if err := os.WriteFile("features.bin", out.Bytes(), 0644); err != nil {
 		log.Fatal(err)
 	}
 
@@ -125,42 +121,87 @@ func main() {
 	}
 }
 
-func isPolygonInsidePolygon(outer orb.Polygon, inner orb.Geometry) bool {
-	switch inner := inner.(type) {
-	case orb.Polygon:
-		// Check if all points of the inner polygon are inside the outer polygon
-		for _, ring := range inner {
-			for _, point := range ring {
-				if !planar.PolygonContains(outer, point) {
-					return false // If any point is outside, it's not wholly contained
-				}
-			}
-		}
-	case orb.MultiPolygon:
-		// Check if all points of the inner multipolygon are inside the outer polygon
-		for _, p := range inner {
-			if !isPolygonInsidePolygon(outer, p) {
-				return false
-			}
-		}
-	case orb.LineString:
-		// Check if all points of the inner line string are inside the outer polygon
-		for _, point := range inner {
-			if !planar.PolygonContains(outer, point) {
-				return false
-			}
-		}
-	case orb.MultiLineString:
-		// Check if all points of the inner multi line string are inside the outer polygon
-		for _, ls := range inner {
-			for _, point := range ls {
-				if !planar.PolygonContains(outer, point) {
-					return false
-				}
-			}
-		}
-	default:
-		log.Fatalf("unknown geometry type: %T", inner)
+func encodeFeatures(features []*geojson.Feature, writer io.Writer) error {
+	if len(features) == 0 {
+		return fmt.Errorf("no features")
 	}
-	return true
+	if len(features) > math.MaxUint32 {
+		return fmt.Errorf("too many features: %d exceeds uint32 capacity", len(features))
+	}
+
+	// Write the number of features
+	if err := binary.Write(writer, binary.LittleEndian, uint32(len(features))); err != nil {
+		return err
+	}
+
+	var baseLon, baseLat float64
+	first := features[0]
+	switch g := first.Geometry.(type) {
+	case orb.LineString:
+		baseLon, baseLat = g[0][0], g[0][1]
+	case orb.MultiLineString:
+		baseLon, baseLat = g[0][0][0], g[0][0][1]
+	default:
+		return fmt.Errorf("unknown geometry type: %T", g)
+	}
+
+	if err := binary.Write(writer, binary.LittleEndian, float64(baseLon)); err != nil {
+		return err
+	}
+	if err := binary.Write(writer, binary.LittleEndian, float64(baseLat)); err != nil {
+		return err
+	}
+
+	for _, feature := range features {
+		// Write title length and title
+		titleBytes := []byte(feature.Properties.MustString("title", ""))
+		if len(titleBytes) > 255 {
+			return fmt.Errorf("title too long: %s exceeds 255 bytes", titleBytes)
+		}
+		if err := binary.Write(writer, binary.LittleEndian, uint8(len(titleBytes))); err != nil {
+			return err
+		}
+		if _, err := writer.Write(titleBytes); err != nil {
+			return err
+		}
+
+		// Write priority
+		if err := binary.Write(writer, binary.LittleEndian, uint8(feature.Properties.MustInt("priority", 0))); err != nil {
+			return err
+		}
+
+		var ls orb.LineString
+		switch g := feature.Geometry.(type) {
+		case orb.LineString:
+			ls = g
+		case orb.MultiLineString:
+			for _, gLS := range g {
+				ls = append(ls, gLS...)
+			}
+		default:
+			return fmt.Errorf("unknown geometry type: %T", g)
+		}
+
+		if len(ls) > math.MaxUint16 {
+			return fmt.Errorf("too many coordinates: %d exceeds uint16 capacity", len(ls))
+		}
+
+		// Write number of coordinates
+		if err := binary.Write(writer, binary.LittleEndian, uint16(len(ls))); err != nil {
+			return err
+		}
+
+		for _, coord := range ls {
+			deltaLon := int32(math.Round((coord[0] - baseLon) * 1000000))
+			if err := binary.Write(writer, binary.LittleEndian, deltaLon); err != nil {
+				return err
+			}
+			deltaLat := int32(math.Round((coord[1] - baseLat) * 1000000))
+			if err := binary.Write(writer, binary.LittleEndian, deltaLat); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
