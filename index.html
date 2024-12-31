@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -61,12 +62,12 @@
   </style>
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 </head>
+
 <body>
   <div class="header" id="priorities-header"></div>
   <div id="map"></div>
 
   <script>
-    // Initialize the map
     var map = L.map('map');
 
     // Add a basemap (OpenStreetMap)
@@ -74,60 +75,123 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
-    // Define a function to style the GeoJSON features
-    function getStyle(feature) {
-      const colors = {
-        '1': '#017A74', // High priority: Dark Green
-        '2': '#E66101', // Medium priority: Orange
-        '3': '#6B3FA0'  // Low priority: Purple
-      };
-
-      return {
-        color: colors[feature.properties.priority] || '#CCCCCC', // Default to grey
-        weight: 6,
-        opacity: 1
-      };
-    }
-
-    // Format the deadline to show weekday and time (e.g., Wed 3:30 PM)
     function formatDeadline(deadline) {
       const deadlineDate = new Date(deadline);
+      const now = new Date();
+      if (deadlineDate > now - (3 * 86400 * 1000)) {
+        return deadlineDate.toLocaleString('en-US', {
+          weekday: 'short',
+          hour: 'numeric',
+          minute: '2-digit'
+        });
+      }
+
       return deadlineDate.toLocaleString('en-US', {
-        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
         hour: 'numeric',
         minute: '2-digit'
       });
     }
 
-    // Load GeoJSON data
-    fetch('data.geojson')
-      .then(response => response.json())
-      .then(data => {
-        // Add GeoJSON to the map
-        var geojsonLayer = L.geoJSON(data, {
-          style: getStyle,
-          onEachFeature: function(feature, layer) {
-            layer.bindPopup(`
-              ${feature.properties.title || 'Unknown'}<br>
-              <strong>Priority:</strong> ${feature.properties.priority || 'Unknown'}<br>
-              <strong>Deadline:</strong> ${feature.properties.deadline || 'Unknown'}<br>
-              <strong>Timeline:</strong> ${feature.properties.timeline || 'Unknown'}
-            `);
-          }
-        }).addTo(map);
+    async function decodeFeatures(arrayBuffer) {
+      const dataView = new DataView(arrayBuffer);
+      let offset = 0;
 
-        // Auto-center map to the GeoJSON layer
-        map.fitBounds(geojsonLayer.getBounds());
-      })
-      .catch(error => console.error('Error loading GeoJSON:', error));
+      const featureCount = dataView.getUint32(offset, true);
+      offset += 4;
 
-    // Load priorities.json
+      const baseLon = dataView.getFloat64(offset, true);
+      offset += 8;
+      const baseLat = dataView.getFloat64(offset, true);
+      offset += 8;
+
+      const features = [];
+      for (let i = 0; i < featureCount; i++) {
+        const titleLength = dataView.getUint8(offset);
+        offset += 1;
+        const title = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, titleLength));
+        offset += titleLength;
+
+        const priority = dataView.getUint8(offset);
+        offset += 1;
+
+        const coordCount = dataView.getUint16(offset, true);
+        offset += 2;
+
+        const coords = [];
+        for (let j = 0; j < coordCount; j++) {
+          // Read delta lat and lon
+          const deltaLon = dataView.getInt32(offset, true) / 1000000;
+          offset += 4;
+          const deltaLat = dataView.getInt32(offset, true) / 1000000;
+          offset += 4;
+
+          // Leaflet expects [lat, lon]
+          coords.push([baseLat + deltaLat, baseLon + deltaLon]);
+        }
+
+        features.push({ title, priority, coords });
+      }
+
+      return features;
+    }
+
+    async function renderFeatures(map, url, priorities) {
+      try {
+        const response = await fetch(url);
+        const arrayBuffer = await response.arrayBuffer();
+        const features = await decodeFeatures(arrayBuffer);
+
+        if (features.length === 0) {
+          console.error('No features to render.');
+          return;
+        }
+
+        const bounds = L.latLngBounds();
+
+        features.forEach(feature => {
+          const color = getPriorityColor(feature.priority);
+
+          const priorityDetails = priorities[feature.priority];
+          const timelineInHours = priorityDetails ? priorityDetails.Timeline / 3600000000000 : 0; // ns to hours
+
+          const polyline = L.polyline(feature.coords, { color, weight: 6 })
+            .bindPopup(`
+              ${feature.title || 'Unknown'}<br>
+              <strong>Priority:</strong> ${feature.priority}<br>
+              <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
+              <strong>Timeline:</strong> ${timelineInHours} hours
+            `).addTo(map);
+
+          bounds.extend(polyline.getBounds());
+        });
+
+        if (bounds.isValid()) {
+          map.fitBounds(bounds);
+        } else {
+          console.error('Calculated bounds are not valid.');
+        }
+
+      } catch (error) {
+        console.error('Error rendering features:', error);
+      }
+    }
+
+    function getPriorityColor(priority) {
+      switch (priority) {
+        case 1: return '#017A74'; // High priority
+        case 2: return '#E66101'; // Medium priority
+        case 3: return '#6B3FA0'; // Low priority
+        default: return '#CCCCCC'; // Default color
+      }
+    }
+
     fetch('priorities.json')
       .then(response => response.json())
       .then(priorities => {
         const prioritiesHeader = document.getElementById('priorities-header');
 
-        // Generate horizontal list of priorities
         prioritiesHeader.innerHTML = Object.entries(priorities)
           .map(([priority, details]) => `
             <div class="priority-item priority-${priority}">
@@ -136,8 +200,11 @@
             </div>
           `)
           .join('');
+
+        renderFeatures(map, 'features.bin', priorities);
       })
       .catch(error => console.error('Error loading priorities:', error));
   </script>
 </body>
+
 </html>
