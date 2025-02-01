@@ -70,6 +70,19 @@
   <script>
     var map = L.map('map');
 
+    function saveMapState(map) {
+      localStorage.setItem('mapState', JSON.stringify({
+        center: map.getCenter(),
+        zoom: map.getZoom()
+      }));
+    }
+
+    function loadMapState() {
+      const savedState = JSON.parse(localStorage.getItem('mapState'));
+      return savedState ? { center: [savedState.center.lat, savedState.center.lng], zoom: savedState.zoom } : null;
+    }
+    const savedState = loadMapState();
+
     // Add a basemap (OpenStreetMap)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
@@ -121,7 +134,7 @@
 
         const coords = [];
         for (let j = 0; j < coordCount; j++) {
-          // Read delta lat and lon
+          // Read delta lon and lat
           const deltaLon = dataView.getInt32(offset, true) / 1000000;
           offset += 4;
           const deltaLat = dataView.getInt32(offset, true) / 1000000;
@@ -167,12 +180,18 @@
           bounds.extend(polyline.getBounds());
         });
 
-        if (bounds.isValid()) {
-          map.fitBounds(bounds);
+          if (bounds.isValid()) {
+              if (savedState) {
+                  map.setView(savedState.center, savedState.zoom);
+              } else {
+                  map.fitBounds(bounds);
+              }
         } else {
           console.error('Calculated bounds are not valid.');
         }
 
+        map.on('moveend', () => saveMapState(map));
+        map.on('zoomend', () => saveMapState(map));
       } catch (error) {
         console.error('Error rendering features:', error);
       }
