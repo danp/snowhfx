@@ -89,6 +89,10 @@
     }).addTo(map);
 
     function formatDeadline(deadline) {
+      if (!deadline) {
+          return "Pending";
+      }
+
       const deadlineDate = new Date(deadline);
       const now = new Date();
       if (deadlineDate > now - (3 * 86400 * 1000)) {
@@ -167,25 +171,24 @@
           const color = getPriorityColor(feature.priority);
 
           const priorityDetails = priorities[feature.priority];
-          const timelineInHours = priorityDetails ? priorityDetails.Timeline / 3600000000000 : 0; // ns to hours
 
           const polyline = L.polyline(feature.coords, { color, weight: 6 })
             .bindPopup(`
               ${feature.title || 'Unknown'}<br>
               <strong>Priority:</strong> ${feature.priority}<br>
               <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
-              <strong>Timeline:</strong> ${timelineInHours} hours
+              <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
             `).addTo(map);
 
           bounds.extend(polyline.getBounds());
         });
 
-          if (bounds.isValid()) {
-              if (savedState) {
-                  map.setView(savedState.center, savedState.zoom);
-              } else {
-                  map.fitBounds(bounds);
-              }
+        if (bounds.isValid()) {
+          if (savedState) {
+              map.setView(savedState.center, savedState.zoom);
+          } else {
+              map.fitBounds(bounds);
+          }
         } else {
           console.error('Calculated bounds are not valid.');
         }
@@ -206,9 +209,30 @@
       }
     }
 
-    fetch('priorities.json')
+    fetch('https://hrm.datasette.danp.net/snow/snowhfx.json?_shape=objects')
       .then(response => response.json())
-      .then(priorities => {
+      .then(data => {
+        let state = data.rows[0].state;
+        let maxEndTime = data.rows[0].max_end_time;
+
+        if (state === "active") {
+          maxEndTime = null;
+        }
+        const endTime = maxEndTime ? new Date(maxEndTime) : null;
+
+        function calculateDeadline(hours) {
+          if (!endTime) {
+              return null;
+          }
+          const d = new Date(endTime.getTime() + (hours * 3600 * 1000));
+          return d;
+        }
+
+        const priorities = {
+          1: { Timeline: 12, Deadline: calculateDeadline(12) },
+          2: { Timeline: 18, Deadline: calculateDeadline(18) },
+          3: { Timeline: 36, Deadline: calculateDeadline(36) }
+        };
         const prioritiesHeader = document.getElementById('priorities-header');
 
         prioritiesHeader.innerHTML = Object.entries(priorities)

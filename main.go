@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
@@ -23,29 +23,9 @@ const activeTravelwaysDownloadURL = `https://hub.arcgis.com/api/download/v1/item
 
 func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	var travelwaysFile, endTimeRaw string
-	fs.StringVar(&endTimeRaw, "end-time", "", "end time in RFC3339 format")
+	var travelwaysFile string
 	fs.StringVar(&travelwaysFile, "travelways", "travelways.json", "path to travelways file")
 	fs.Parse(os.Args[1:])
-
-	if endTimeRaw == "" {
-		log.Fatal("missing end time")
-	}
-	endTime, err := time.Parse(time.RFC3339, endTimeRaw)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	type priority struct {
-		Number   int
-		Timeline time.Duration
-		Deadline time.Time
-	}
-	priorities := map[string]priority{
-		"1": {1, 12 * time.Hour, endTime.Add(12 * time.Hour)},
-		"2": {2, 18 * time.Hour, endTime.Add(18 * time.Hour)},
-		"3": {3, 36 * time.Hour, endTime.Add(36 * time.Hour)},
-	}
 
 	var travelways []byte
 	if travelwaysFile == "" {
@@ -79,10 +59,11 @@ func main() {
 		}
 		travelways = b
 	} else {
-		travelways, err = os.ReadFile(travelwaysFile)
+		b, err := os.ReadFile(travelwaysFile)
 		if err != nil {
 			log.Fatal(err)
 		}
+		travelways = b
 	}
 
 	fc := geojson.NewFeatureCollection()
@@ -98,15 +79,16 @@ func main() {
 		f.Properties = make(geojson.Properties)
 
 		priorityNum := strings.TrimPrefix(props.MustString("WINT_LOS", ""), "PRI")
-		p, ok := priorities[priorityNum]
-		if !ok {
-			log.Fatalf("unknown WINT_LOS: %s", props.MustString("WINT_LOS", ""))
+		priority, err := strconv.Atoi(priorityNum)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if priority < 1 || priority > 3 {
+			log.Fatalf("invalid priority: %d", priority)
 		}
 
 		f.Properties["title"] = props["LOCATION"]
-		f.Properties["priority"] = p.Number
-		f.Properties["timeline"] = fmt.Sprintf("%d hours", int(p.Timeline.Hours()))
-		f.Properties["deadline"] = p.Deadline.Format("Mon 3:04 PM")
+		f.Properties["priority"] = priority
 	}
 
 	var out bytes.Buffer
@@ -114,15 +96,6 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := os.WriteFile("features.bin", out.Bytes(), 0644); err != nil {
-		log.Fatal(err)
-	}
-
-	b, err := json.Marshal(priorities)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := os.WriteFile("priorities.json", b, 0644); err != nil {
 		log.Fatal(err)
 	}
 }
