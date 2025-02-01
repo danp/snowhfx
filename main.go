@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -21,7 +22,12 @@ import (
 const activeTravelwaysDownloadURL = `https://hub.arcgis.com/api/download/v1/items/a3631c7664ef4ecb93afb1ea4c12022b/geojson?redirect=false&layers=0&spatialRefId=4326`
 
 func main() {
-	endTimeRaw := os.Args[1]
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	var travelwaysFile, endTimeRaw string
+	fs.StringVar(&endTimeRaw, "end-time", "", "end time in RFC3339 format")
+	fs.StringVar(&travelwaysFile, "travelways", "travelways.json", "path to travelways file")
+	fs.Parse(os.Args[1:])
+
 	if endTimeRaw == "" {
 		log.Fatal("missing end time")
 	}
@@ -41,37 +47,46 @@ func main() {
 		"3": {3, 36 * time.Hour, endTime.Add(36 * time.Hour)},
 	}
 
-	resp, err := http.Get(activeTravelwaysDownloadURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
+	var travelways []byte
+	if travelwaysFile == "" {
+		resp, err := http.Get(activeTravelwaysDownloadURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer resp.Body.Close()
 
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-	var downloadBody struct {
-		ResultURL string `json:"resultUrl"`
-	}
-	if err := json.Unmarshal(b, &downloadBody); err != nil {
-		log.Fatal(err)
-	}
+		var downloadBody struct {
+			ResultURL string `json:"resultUrl"`
+		}
+		if err := json.Unmarshal(b, &downloadBody); err != nil {
+			log.Fatal(err)
+		}
 
-	resp, err = http.Get(downloadBody.ResultURL)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
+		resp, err = http.Get(downloadBody.ResultURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer resp.Body.Close()
 
-	b, err = io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
+		b, err = io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatal(err)
+		}
+		travelways = b
+	} else {
+		travelways, err = os.ReadFile(travelwaysFile)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	fc := geojson.NewFeatureCollection()
-	if err := json.Unmarshal(b, &fc); err != nil {
+	if err := json.Unmarshal(travelways, &fc); err != nil {
 		log.Fatal(err)
 	}
 
@@ -102,7 +117,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	b, err = json.Marshal(priorities)
+	b, err := json.Marshal(priorities)
 	if err != nil {
 		log.Fatal(err)
 	}
