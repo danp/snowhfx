@@ -1,9 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Halifax Sidewalk Snow Clearing</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
@@ -12,8 +11,7 @@
       width: 100%;
       height: 90vh;
     }
-
-    /* Header for priorities */
+    /* Header styling */
     .header {
       padding: 10px;
       background-color: #f4f4f4;
@@ -24,13 +22,11 @@
       align-items: center;
       gap: 20px;
     }
-
     .priority-item {
       display: flex;
       align-items: center;
       gap: 10px;
     }
-
     .priority-square {
       width: 30px;
       height: 30px;
@@ -42,19 +38,15 @@
       color: white;
       border-radius: 4px;
     }
-
     .priority-1 .priority-square {
       background-color: #017A74;
     }
-
     .priority-2 .priority-square {
       background-color: #E66101;
     }
-
     .priority-3 .priority-square {
       background-color: #6B3FA0;
     }
-
     .priority-deadline {
       font-size: 14px;
       color: #333;
@@ -62,179 +54,224 @@
   </style>
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 </head>
-
 <body>
   <div class="header" id="priorities-header"></div>
   <div id="map"></div>
-
   <script>
+    // Initialize the Leaflet map.
     var map = L.map('map');
 
+    // Save and load the map state (center and zoom) to localStorage.
     function saveMapState(map) {
       localStorage.setItem('mapState', JSON.stringify({
         center: map.getCenter(),
         zoom: map.getZoom()
       }));
     }
-
     function loadMapState() {
-      const savedState = JSON.parse(localStorage.getItem('mapState'));
-      return savedState ? { center: [savedState.center.lat, savedState.center.lng], zoom: savedState.zoom } : null;
+      const saved = JSON.parse(localStorage.getItem('mapState'));
+      return saved ? { center: [saved.center.lat, saved.center.lng], zoom: saved.zoom } : null;
     }
     const savedState = loadMapState();
 
-    // Add a basemap (OpenStreetMap)
+    // Add an OpenStreetMap basemap.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
     }).addTo(map);
 
+    // Format a deadline date for display.
     function formatDeadline(deadline) {
-      if (!deadline) {
-          return "Pending";
-      }
-
-      const deadlineDate = new Date(deadline);
+      if (!deadline) return "Pending";
+      const d = new Date(deadline);
       const now = new Date();
-      if (deadlineDate > now - (3 * 86400 * 1000)) {
-        return deadlineDate.toLocaleString('en-US', {
-          weekday: 'short',
-          hour: 'numeric',
-          minute: '2-digit'
-        });
+      if (d > now - (3 * 86400 * 1000)) {
+        return d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
       }
-
-      return deadlineDate.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit'
-      });
+      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
     }
 
-    async function decodeFeatures(arrayBuffer) {
+    /**
+     * Decode segmented features from the binary file.
+     *
+     * Expected binary layout:
+     * - uint32: numberOfSegments
+     * - float64: globalBaseLon
+     * - float64: globalBaseLat
+     *
+     * For each segment:
+     *   - int32: segDeltaMinLon
+     *   - int32: segDeltaMinLat
+     *   - int32: segDeltaMaxLon
+     *   - int32: segDeltaMaxLat
+     *   - uint32: numberOfFeaturesInSegment
+     *
+     *   For each feature:
+     *     - uint8: titleLength
+     *     - [titleLength] bytes: title string
+     *     - uint8: priority
+     *     - uint16: coordinateCount
+     *     - For each coordinate:
+     *         - int32: deltaLon
+     *         - int32: deltaLat
+     *
+     * (All delta values are relative to the global base and use a multiplier of 1e6.)
+     */
+    async function decodeSegmentedFeatures(arrayBuffer) {
       const dataView = new DataView(arrayBuffer);
       let offset = 0;
-
-      const featureCount = dataView.getUint32(offset, true);
+      const segmentCount = dataView.getUint32(offset, true);
       offset += 4;
-
       const baseLon = dataView.getFloat64(offset, true);
       offset += 8;
       const baseLat = dataView.getFloat64(offset, true);
       offset += 8;
 
-      const features = [];
-      for (let i = 0; i < featureCount; i++) {
-        const titleLength = dataView.getUint8(offset);
-        offset += 1;
-        const title = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, titleLength));
-        offset += titleLength;
+      const segments = [];
+      for (let s = 0; s < segmentCount; s++) {
+        // Read the segment's bounding box (as deltas from the global base).
+        const segDeltaMinLon = dataView.getInt32(offset, true); offset += 4;
+        const segDeltaMinLat = dataView.getInt32(offset, true); offset += 4;
+        const segDeltaMaxLon = dataView.getInt32(offset, true); offset += 4;
+        const segDeltaMaxLat = dataView.getInt32(offset, true); offset += 4;
+        const segBounds = L.latLngBounds(
+          [baseLat + segDeltaMinLat / 1000000, baseLon + segDeltaMinLon / 1000000],
+          [baseLat + segDeltaMaxLat / 1000000, baseLon + segDeltaMaxLon / 1000000]
+        );
 
-        const priority = dataView.getUint8(offset);
-        offset += 1;
-
-        const coordCount = dataView.getUint16(offset, true);
-        offset += 2;
-
-        const coords = [];
-        for (let j = 0; j < coordCount; j++) {
-          // Read delta lon and lat
-          const deltaLon = dataView.getInt32(offset, true) / 1000000;
-          offset += 4;
-          const deltaLat = dataView.getInt32(offset, true) / 1000000;
-          offset += 4;
-
-          // Leaflet expects [lat, lon]
-          coords.push([baseLat + deltaLat, baseLon + deltaLon]);
+        // Read the number of features in this segment.
+        const numFeatures = dataView.getUint32(offset, true);
+        offset += 4;
+        const features = [];
+        for (let i = 0; i < numFeatures; i++) {
+          // Read title.
+          const titleLength = dataView.getUint8(offset); offset += 1;
+          const title = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, titleLength));
+          offset += titleLength;
+          // Read priority.
+          const priority = dataView.getUint8(offset); offset += 1;
+          // Read coordinate count.
+          const coordCount = dataView.getUint16(offset, true); offset += 2;
+          const coords = [];
+          for (let j = 0; j < coordCount; j++) {
+            const deltaLon = dataView.getInt32(offset, true) / 1000000; offset += 4;
+            const deltaLat = dataView.getInt32(offset, true) / 1000000; offset += 4;
+            // Leaflet expects [lat, lon].
+            coords.push([baseLat + deltaLat, baseLon + deltaLon]);
+          }
+          features.push({ title, priority, coords });
         }
-
-        features.push({ title, priority, coords });
+        segments.push({ bounds: segBounds, features });
       }
-
-      return features;
+      return segments;
     }
 
-    async function renderFeatures(map, url, priorities) {
+    // Global storage for segments and rendered segments.
+    let allSegments = [];
+    const featuresLayer = L.layerGroup().addTo(map);
+    // Track segments that are currently rendered, keyed by segment index.
+    const renderedSegments = {};
+
+    // Return a color based on feature priority.
+    function getPriorityColor(priority) {
+      switch (priority) {
+        case 1: return '#017A74';
+        case 2: return '#E66101';
+        case 3: return '#6B3FA0';
+        default: return '#CCCCCC';
+      }
+    }
+
+    /**
+     * Update which segments are rendered based on the current map viewport.
+     * If any part of a segment is visible, all its features are rendered.
+     */
+    function updateVisibleFeatures() {
+      const mapBounds = map.getBounds();
+      allSegments.forEach((segment, segIndex) => {
+        if (mapBounds.intersects(segment.bounds)) {
+          // If this segment isn’t rendered yet, add it.
+          if (!(segIndex in renderedSegments)) {
+            const segmentLayer = L.layerGroup();
+            segment.features.forEach((feature) => {
+              const color = getPriorityColor(feature.priority);
+              const priorityDetails = window.priorities[feature.priority];
+              const polyline = L.polyline(feature.coords, { color, weight: 6 })
+                .bindPopup(`
+                  ${feature.title || 'Unknown'}<br>
+                  <strong>Priority:</strong> ${feature.priority}<br>
+                  <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
+                  <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
+                `);
+              polyline.addTo(segmentLayer);
+            });
+            segmentLayer.addTo(featuresLayer);
+            renderedSegments[segIndex] = segmentLayer;
+          }
+        } else {
+          // If the segment is not visible and is currently rendered, remove it.
+          if (segIndex in renderedSegments) {
+            featuresLayer.removeLayer(renderedSegments[segIndex]);
+            delete renderedSegments[segIndex];
+          }
+        }
+      });
+    }
+
+    /**
+     * Load and render segmented features from the binary file.
+     */
+    async function loadAndRenderSegmentedFeatures(url) {
       try {
         const response = await fetch(url);
         const arrayBuffer = await response.arrayBuffer();
-        const features = await decodeFeatures(arrayBuffer);
-
-        if (features.length === 0) {
-          console.error('No features to render.');
+        allSegments = await decodeSegmentedFeatures(arrayBuffer);
+        if (allSegments.length === 0) {
+          console.error("No segments found in the binary file.");
           return;
         }
-
-        const bounds = L.latLngBounds();
-
-        features.forEach(feature => {
-          const color = getPriorityColor(feature.priority);
-
-          const priorityDetails = priorities[feature.priority];
-
-          const polyline = L.polyline(feature.coords, { color, weight: 6 })
-            .bindPopup(`
-              ${feature.title || 'Unknown'}<br>
-              <strong>Priority:</strong> ${feature.priority}<br>
-              <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
-              <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
-            `).addTo(map);
-
-          bounds.extend(polyline.getBounds());
-        });
-
-        if (bounds.isValid()) {
-          if (savedState) {
-              map.setView(savedState.center, savedState.zoom);
-          } else {
-              map.fitBounds(bounds);
-          }
+        // Compute global bounds from all segments.
+        const globalBounds = L.latLngBounds();
+        allSegments.forEach(segment => globalBounds.extend(segment.bounds));
+        if (savedState) {
+          map.setView(savedState.center, savedState.zoom);
         } else {
-          console.error('Calculated bounds are not valid.');
+          map.fitBounds(globalBounds);
         }
-
-        map.on('moveend', () => saveMapState(map));
-        map.on('zoomend', () => saveMapState(map));
+        updateVisibleFeatures();
+        // Update visible segments when the map moves or zooms.
+        map.on('moveend zoomend', () => {
+          saveMapState(map);
+          updateVisibleFeatures();
+        });
       } catch (error) {
-        console.error('Error rendering features:', error);
+        console.error("Error rendering segmented features:", error);
       }
     }
 
-    function getPriorityColor(priority) {
-      switch (priority) {
-        case 1: return '#017A74'; // High priority
-        case 2: return '#E66101'; // Medium priority
-        case 3: return '#6B3FA0'; // Low priority
-        default: return '#CCCCCC'; // Default color
-      }
-    }
-
+    // Load priority/timeline data.
     fetch('https://hrm.datasette.danp.net/snow/snowhfx.json?_shape=objects')
       .then(response => response.json())
       .then(data => {
         let state = data.rows[0].state;
         let maxEndTime = data.rows[0].max_end_time;
-
         if (state === "active") {
           maxEndTime = null;
         }
         const endTime = maxEndTime ? new Date(maxEndTime) : null;
-
         function calculateDeadline(hours) {
-          if (!endTime) {
-              return null;
-          }
-          const d = new Date(endTime.getTime() + (hours * 3600 * 1000));
-          return d;
+          if (!endTime) return null;
+          return new Date(endTime.getTime() + (hours * 3600 * 1000));
         }
-
         const priorities = {
           1: { Timeline: 12, Deadline: calculateDeadline(12) },
           2: { Timeline: 18, Deadline: calculateDeadline(18) },
           3: { Timeline: 36, Deadline: calculateDeadline(36) }
         };
+        // Make priorities available globally.
+        window.priorities = priorities;
+        // Update the header with priority details.
         const prioritiesHeader = document.getElementById('priorities-header');
-
         prioritiesHeader.innerHTML = Object.entries(priorities)
           .map(([priority, details]) => `
             <div class="priority-item priority-${priority}">
@@ -243,11 +280,10 @@
             </div>
           `)
           .join('');
-
-        renderFeatures(map, 'features.bin', priorities);
+        // Load and render the segmented features.
+        loadAndRenderSegmentedFeatures('features.bin');
       })
-      .catch(error => console.error('Error loading priorities:', error));
+      .catch(error => console.error("Error loading priorities:", error));
   </script>
 </body>
-
 </html>
