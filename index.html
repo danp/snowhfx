@@ -182,37 +182,48 @@
       }
     }
 
+    function getPopupContent(segmentIdx, featureIdx) {
+      const segment = allSegments[segmentIdx];
+      if (!segment) return "Unknown segment";
+      const feature = segment.features[featureIdx];
+      if (!feature) return "Unknown feature";
+      const priorityDetails = window.priorities[feature.priority];
+      return `
+        ${feature.title || 'Unknown'}<br>
+        <strong>Priority:</strong> ${feature.priority}<br>
+        <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
+        <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
+      `;
+    }
+
     /**
      * Update which segments are rendered based on the current map viewport.
      * If any part of a segment is visible, all its features are rendered.
      */
     function updateVisibleFeatures() {
       const mapBounds = map.getBounds();
-      allSegments.forEach((segment, segIndex) => {
+      allSegments.forEach((segment, segmentIdx) => {
         if (mapBounds.intersects(segment.bounds)) {
           // If this segment isn’t rendered yet, add it.
-          if (!(segIndex in renderedSegments)) {
+          if (!(segmentIdx in renderedSegments)) {
             const segmentLayer = L.layerGroup();
-            segment.features.forEach((feature) => {
+            segment.features.forEach((feature, featureIdx) => {
               const color = getPriorityColor(feature.priority);
               const priorityDetails = window.priorities[feature.priority];
               const polyline = L.polyline(feature.coords, { color, weight: 6 })
-                .bindPopup(`
-                  ${feature.title || 'Unknown'}<br>
-                  <strong>Priority:</strong> ${feature.priority}<br>
-                  <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
-                  <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
-                `);
+                .bindPopup(function() {
+                   return getPopupContent(segmentIdx, featureIdx);
+                 });
               polyline.addTo(segmentLayer);
             });
             segmentLayer.addTo(featuresLayer);
-            renderedSegments[segIndex] = segmentLayer;
+            renderedSegments[segmentIdx] = segmentLayer;
           }
         } else {
           // If the segment is not visible and is currently rendered, remove it.
-          if (segIndex in renderedSegments) {
-            featuresLayer.removeLayer(renderedSegments[segIndex]);
-            delete renderedSegments[segIndex];
+          if (segmentIdx in renderedSegments) {
+            featuresLayer.removeLayer(renderedSegments[segmentIdx]);
+            delete renderedSegments[segmentIdx];
           }
         }
       });
