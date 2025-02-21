@@ -260,35 +260,41 @@
       }
     }
 
-    const priorities ={
-      "1": {
-          "Timeline": 12,
-          "Deadline": "2025-02-17T18:00:00.000Z"
-      },
-      "2": {
-          "Timeline": 18,
-          "Deadline": "2025-02-18T00:00:00.000Z"
-      },
-      "3": {
-          "Timeline": 36,
-          "Deadline": "2025-02-18T18:00:00.000Z"
-      }
-    }
-
-    // Make priorities available globally.
-    window.priorities = priorities;
-    // Update the header with priority details.
-    const prioritiesHeader = document.getElementById('priorities-header');
-    prioritiesHeader.innerHTML = Object.entries(priorities)
-      .map(([priority, details]) => `
-        <div class="priority-item priority-${priority}">
-          <div class="priority-square">${priority}</div>
-          <div class="priority-deadline">${formatDeadline(details.Deadline)}</div>
-        </div>
-      `)
-      .join('');
-    // Load and render the segmented features.
-    loadAndRenderSegmentedFeatures('features.bin');
+    // Load priority/timeline data.
+    fetch('https://hrm.datasette.danp.net/snow/snowhfx.json?_shape=objects')
+      .then(response => response.json())
+      .then(data => {
+        let state = data.rows[0].state;
+        let maxEndTime = data.rows[0].max_end_time;
+        if (state === "active") {
+          maxEndTime = null;
+        }
+        const endTime = maxEndTime ? new Date(maxEndTime) : null;
+        function calculateDeadline(hours) {
+          if (!endTime) return null;
+          return new Date(endTime.getTime() + (hours * 3600 * 1000));
+        }
+        const priorities = {
+          1: { Timeline: 12, Deadline: calculateDeadline(12) },
+          2: { Timeline: 18, Deadline: calculateDeadline(18) },
+          3: { Timeline: 36, Deadline: calculateDeadline(36) }
+        };
+        // Make priorities available globally.
+        window.priorities = priorities;
+        // Update the header with priority details.
+        const prioritiesHeader = document.getElementById('priorities-header');
+        prioritiesHeader.innerHTML = Object.entries(priorities)
+          .map(([priority, details]) => `
+            <div class="priority-item priority-${priority}">
+              <div class="priority-square">${priority}</div>
+              <div class="priority-deadline">${formatDeadline(details.Deadline)}</div>
+            </div>
+          `)
+          .join('');
+        // Load and render the segmented features.
+        loadAndRenderSegmentedFeatures('features.bin');
+      })
+      .catch(error => console.error("Error loading priorities:", error));
   </script>
   <script>
     window.goatcounter = {
