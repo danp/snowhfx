@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -14,49 +15,33 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
 )
 
-const activeTravelwaysDownloadURL = `https://hub.arcgis.com/api/download/v1/items/a3631c7664ef4ecb93afb1ea4c12022b/geojson?redirect=false&layers=0&spatialRefId=4326`
-
 func main() {
+	ctx := context.Background()
+
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	var travelwaysFile string
-	fs.StringVar(&travelwaysFile, "travelways", "travelways.json", "path to travelways file")
+	fs.StringVar(&travelwaysFile, "travelways", "", "path to travelways geojson file, otherwise download")
 	fs.Parse(os.Args[1:])
 
 	var travelways []byte
 	if travelwaysFile == "" {
-		resp, err := http.Get(activeTravelwaysDownloadURL)
+		rc, err := download(ctx)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer rc.Close()
 
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(rc)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		var downloadBody struct {
-			ResultURL string `json:"resultUrl"`
-		}
-		if err := json.Unmarshal(b, &downloadBody); err != nil {
-			log.Fatal(err)
-		}
-
-		resp, err = http.Get(downloadBody.ResultURL)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer resp.Body.Close()
-
-		b, err = io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatal(err)
-		}
 		travelways = b
 	} else {
 		b, err := os.ReadFile(travelwaysFile)
@@ -220,8 +205,8 @@ func encodeFeatures(features []*geojson.Feature, writer io.Writer) error {
 	}
 	var segments []segment
 	// We iterate over the grid in row‑major order.
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
+	for row := range rows {
+		for col := range cols {
 			key := cellKey{row: row, col: col}
 			if feats, ok := segmentsMap[key]; ok {
 				segments = append(segments, segment{
@@ -319,4 +304,69 @@ func encodeFeatures(features []*geojson.Feature, writer io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func download(ctx context.Context) (io.ReadCloser, error) {
+	const activeTravelwaysDownloadURL = `https://hub.arcgis.com/api/download/v1/items/a3631c7664ef4ecb93afb1ea4c12022b/geojson?redirect=false&layers=0&spatialRefId=4326`
+
+	deadline := time.Now().Add(5 * time.Minute)
+
+	var resultURL string
+	for time.Now().Before(deadline) {
+		u, err := func() (string, error) {
+			req, err := http.NewRequestWithContext(ctx, "GET", activeTravelwaysDownloadURL, nil)
+			if err != nil {
+				return "", fmt.Errorf("creating request: %w", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("executing request: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode/100 != 2 {
+				return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			}
+
+			b, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return "", fmt.Errorf("reading body: %w", err)
+			}
+
+			var body struct {
+				ResultURL string `json:"resultUrl"`
+			}
+			if err := json.Unmarshal(b, &body); err != nil {
+				return "", fmt.Errorf("unmarshaling body: %w", err)
+			}
+
+			return body.ResultURL, nil
+		}()
+		if err != nil {
+			return nil, fmt.Errorf("downloading data: %w", err)
+		}
+		if u == "" {
+			log.Println("waiting")
+			select {
+			case <-time.After(5 * time.Second):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		resultURL = u
+		break
+	}
+
+	log.Println("downloading from", resultURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", resultURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing request: %w", err)
+	}
+	return resp.Body, nil
 }
