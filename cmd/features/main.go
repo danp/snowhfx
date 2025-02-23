@@ -72,7 +72,13 @@ func main() {
 			log.Fatalf("invalid priority: %d", priority)
 		}
 
-		f.Properties["title"] = props["LOCATION"]
+		if title := props.MustString("LOCATION", ""); title != "" {
+			if title == "CORNWALLIS ST" {
+				title = "NORA BERNARD ST"
+			}
+			f.Properties["title"] = title
+		}
+
 		f.Properties["priority"] = priority
 	}
 
