@@ -198,7 +198,7 @@ func parseUpdateTime(txt string, t time.Time) (_ time.Time, ok bool) {
 		{"3 PM Mon Jan 2", false, true, true},
 		{"3 PM Mon January 2", false, true, true},
 		{"3 PM Monday Jan 2", false, true, true},
-		{"3 PM Monday January 2", false, false, true},
+		{"3 PM Monday January 2", false, true, true},
 		{"3 PM", false, false, true},
 		{"3:04 PM Jan 2", false, true, true},
 		{"3:04 PM January 2", false, true, true},
