@@ -3,40 +3,157 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Halifax Sidewalk Snow Clearing</title>
+  <title>Halifax Sidewalk and Cycling Snow Clearing</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
     /* Ensure the map is fully responsive */
     #map {
       width: 100%;
-      height: 90vh;
+      flex: 1 1 auto;
+    }
+    :root {
+      --header-bg: #f4f4f4;
+      --header-border: #ddd;
+      --text-primary: #222;
+      --text-muted: #333;
+      --control-bg: #fff;
+      --control-border: #aaa;
+      --toggle-active: #3C4A5D;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --header-bg: #1b1f24;
+        --header-border: #2a3038;
+        --text-primary: #e6e8eb;
+        --text-muted: #c9ced6;
+        --control-bg: #222831;
+        --control-border: #3a424d;
+        --toggle-active: #5b6b80;
+      }
     }
     /* Header styling */
     .header {
       padding: 10px;
-      background-color: #f4f4f4;
-      border-bottom: 1px solid #ddd;
+      background-color: var(--header-bg);
+      border-bottom: 1px solid var(--header-border);
       font-family: Arial, sans-serif;
       font-size: 14px;
       display: flex;
       align-items: center;
+      gap: 24px;
+      flex-wrap: wrap;
+      color: var(--text-primary);
+    }
+    .mobile-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .quick-toggle {
+      display: inline-flex;
+      border: 1px solid var(--control-border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .quick-toggle button {
+      border: 0;
+      background: var(--control-bg);
+      padding: 4px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+    .quick-toggle button.is-active {
+      background: var(--toggle-active);
+      color: #fff;
+      font-weight: 700;
+    }
+    .gear-toggle {
+      border: 1px solid var(--control-border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      padding: 4px 8px;
+      font-size: 14px;
+      cursor: pointer;
+      display: none;
+      color: var(--text-primary);
+    }
+    .about-toggle {
+      border: 1px solid var(--control-border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      padding: 4px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-primary);
+    }
+    .skip-link {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      padding: 6px 10px;
+      background: var(--control-bg);
+      color: var(--text-primary);
+      border: 1px solid var(--control-border);
+      border-radius: 6px;
+      text-decoration: none;
+      transform: translateY(-200%);
+      transition: transform 0.2s ease;
+      z-index: 1000;
+    }
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+    .quick-toggle button:focus-visible,
+    .gear-toggle:focus-visible,
+    .about-toggle:focus-visible {
+      outline: 2px solid #017A74;
+      outline-offset: 2px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .quick-toggle button:focus-visible,
+      .gear-toggle:focus-visible,
+      .about-toggle:focus-visible {
+        outline-color: #78c2b7;
+      }
+    }
+    .priorities {
+      display: flex;
+      align-items: center;
       gap: 20px;
+      flex-wrap: wrap;
     }
     .priority-item {
       display: flex;
       align-items: center;
       gap: 10px;
+      padding: 6px 10px 6px 30px;
+      border-radius: 6px;
+      position: relative;
+      color: #fff;
     }
     .priority-square {
-      width: 30px;
-      height: 30px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
+      display: none;
+    }
+    .priority-item::before {
+      position: absolute;
+      left: 8px;
+      top: 50%;
+      transform: translateY(-50%);
       font-weight: bold;
-      font-size: 16px;
-      color: white;
-      border-radius: 4px;
+      font-size: 12px;
+      letter-spacing: 0.4px;
+      opacity: 0.95;
     }
     .priority-1 .priority-square {
       background-color: #017A74;
@@ -47,48 +164,238 @@
     .priority-3 .priority-square {
       background-color: #6B3FA0;
     }
+    .priority-1 {
+      background-color: #017A74;
+    }
+    .priority-2 {
+      background-color: #E66101;
+    }
+    .priority-3 {
+      background-color: #6B3FA0;
+    }
+    .priority-1::before {
+      content: "P1";
+    }
+    .priority-2::before {
+      content: "P2";
+    }
+    .priority-3::before {
+      content: "P3";
+    }
     .priority-deadline {
       font-size: 14px;
-      color: #333;
+      color: #fff;
+    }
+    .about-panel {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+      padding: 16px;
+    }
+    .about-panel.is-open {
+      display: flex;
+    }
+    .about-card {
+      background: var(--control-bg);
+      color: var(--text-primary);
+      border: 1px solid var(--header-border);
+      border-radius: 10px;
+      max-width: 560px;
+      width: 100%;
+      padding: 16px;
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.4;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+    }
+    .about-card h2 {
+      font-size: 14px;
+      margin: 0 0 8px;
+    }
+    .about-card p {
+      margin: 6px 0;
+      color: var(--text-muted);
+    }
+    .about-card a {
+      color: inherit;
+    }
+    .about-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .about-close {
+      border: 1px solid var(--control-border);
+      border-radius: 6px;
+      background: var(--control-bg);
+      padding: 4px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      color: var(--text-primary);
+    }
+    @media (max-width: 480px) {
+      .header {
+        gap: 12px;
+      }
+      .priorities {
+        width: 100%;
+        justify-content: center;
+      }
+      .priority-item {
+        flex: 0 1 auto;
+      }
+      .priority-deadline {
+        text-align: center;
+      }
+      .gear-toggle {
+        display: inline-flex;
+      }
+      .priority-item {
+        padding: 6px 8px;
+      }
+      .priority-deadline {
+        font-weight: bold;
+      }
+      .priority-item::before {
+        content: "";
+      }
+      body.mobile-expanded .priority-item {
+        padding: 6px 8px 6px 28px;
+      }
+      body.mobile-expanded .priority-1::before {
+        content: "P1";
+      }
+      body.mobile-expanded .priority-2::before {
+        content: "P2";
+      }
+      body.mobile-expanded .priority-3::before {
+        content: "P3";
+      }
+      .about-toggle {
+        display: none;
+      }
+      body.mobile-expanded .about-toggle {
+        display: inline-flex;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .skip-link {
+        transition: none;
+      }
     }
   </style>
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 </head>
 <body>
-  <div class="header" id="priorities-header"></div>
-  <div id="map"></div>
+  <a class="skip-link" href="#map">Skip to map</a>
+  <div class="header">
+    <div class="priorities" id="priorities-header"></div>
+    <div class="mobile-controls" id="mobile-controls">
+      <button class="about-toggle" id="about-toggle" type="button" aria-expanded="false" aria-controls="about-panel">About</button>
+      <div class="quick-toggle" role="group" aria-label="Map mode">
+        <button type="button" data-mode="sidewalks" data-short="S" data-full="Sidewalks" aria-label="Sidewalks">S</button>
+        <button type="button" data-mode="cycling" data-short="C" data-full="Cycling" aria-label="Cycling">C</button>
+      </div>
+      <button class="gear-toggle" id="gear-toggle" type="button" aria-label="More options">⚙</button>
+    </div>
+  </div>
+  <div id="map" role="region" aria-label="Map of Halifax snow clearing priorities for sidewalks and cycling routes"></div>
+  <div class="about-panel" id="about-panel" aria-hidden="true">
+    <div class="about-card" role="dialog" aria-modal="true" aria-labelledby="about-title">
+      <h2 id="about-title">About</h2>
+      <p>
+        Service updates are sourced from
+        <a href="https://www.halifax.ca/transportation/winter-operations/service-updates" target="_blank" rel="noopener">Winter Operations Service Updates</a>
+        (updated about hourly). Clearing deadlines are based on that page.
+      </p>
+      <p>
+        Priority definitions for streets and sidewalks are described on
+        <a href="https://www.halifax.ca/transportation/winter-operations/snow-clearing-service-standards" target="_blank" rel="noopener">Snow Clearing Service Standards</a>.
+      </p>
+      <p>
+        Sidewalks, multi-use paths, etc. are sourced from the
+        <a href="https://data-hrm.hub.arcgis.com/datasets/a3631c7664ef4ecb93afb1ea4c12022b_0/explore" target="_blank" rel="noopener">Active Travelways</a>
+        dataset.
+      </p>
+      <p>
+        Cycling infrastructure and routes are sourced from the
+        <a href="https://data-hrm.hub.arcgis.com/datasets/HRM::bike-infrastructure-and-suggested-routes/explore" target="_blank" rel="noopener">Bike Infrastructure and Suggested Routes</a> dataset.
+        Routes contain painted bike lanes, multi-use pathways, and shared roadways, some of which are not necessarily "infrastructure."
+        Some routes are missing or excluded if they are not part of that dataset or aren't plowed by HRM.
+        Priorities are assigned by matching to nearby Active Travelways or
+        <a href="https://data-hrm.hub.arcgis.com/datasets/HRM::ice-routes/explore" target="_blank" rel="noopener">Ice Routes</a>,
+        with unmatched lines omitted.
+      </p>
+      <p>
+        Read more about the development in
+        <a href="https://danp.net/posts/halifax-sidewalk-snow-clearing-map/" target="_blank" rel="noopener">this blog post</a>
+        or browse the code on
+        <a href="https://github.com/danp/snowhfx" target="_blank" rel="noopener">GitHub</a>.
+      </p>
+      <div class="about-actions">
+        <button class="about-close" id="about-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
   <script>
     // Initialize the Leaflet map.
-    var map = L.map('map');
+    var map = L.map('map', { preferCanvas: true });
 
     // Save and load the map state (center and zoom) to localStorage.
     function saveMapState(map) {
-      localStorage.setItem('mapState', JSON.stringify({
+      savedState = {
         center: map.getCenter(),
         zoom: map.getZoom()
-      }));
+      };
+      localStorage.setItem('mapState', JSON.stringify(savedState));
     }
     function loadMapState() {
       const saved = JSON.parse(localStorage.getItem('mapState'));
       return saved ? { center: [saved.center.lat, saved.center.lng], zoom: saved.zoom } : null;
     }
-    const savedState = loadMapState();
+    let savedState = loadMapState();
 
     // Add an OpenStreetMap basemap.
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    const lightTiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-    }).addTo(map);
+    });
+    const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    });
+
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+    function setBasemap(isDark) {
+      if (isDark) {
+        map.removeLayer(lightTiles);
+        darkTiles.addTo(map);
+      } else {
+        map.removeLayer(darkTiles);
+        lightTiles.addTo(map);
+      }
+    }
+    setBasemap(prefersDark.matches);
+    if (prefersDark.addEventListener) {
+      prefersDark.addEventListener('change', (event) => setBasemap(event.matches));
+    } else if (prefersDark.addListener) {
+      prefersDark.addListener((event) => setBasemap(event.matches));
+    }
 
     // Format a deadline date for display.
     function formatDeadline(deadline) {
       if (!deadline) return "Pending";
       const d = new Date(deadline);
       const now = new Date();
+      const trimMinutes = (value) => value.replace(':00 ', ' ');
       if (d > now - (3 * 86400 * 1000)) {
-        return d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+        return trimMinutes(d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit' }));
       }
-      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+      return trimMinutes(d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
     }
 
     /**
@@ -110,6 +417,7 @@
      *     - uint8: titleLength
      *     - [titleLength] bytes: title string
      *     - uint8: priority
+     *     - uint8: sourceDataset
      *     - uint16: coordinateCount
      *     - For each coordinate:
      *         - int32: deltaLon
@@ -150,6 +458,7 @@
           offset += titleLength;
           // Read priority.
           const priority = dataView.getUint8(offset); offset += 1;
+          const sourceDataset = dataView.getUint8(offset); offset += 1;
           // Read coordinate count.
           const coordCount = dataView.getUint16(offset, true); offset += 2;
           const coords = [];
@@ -159,7 +468,7 @@
             // Leaflet expects [lat, lon].
             coords.push([baseLat + deltaLat, baseLon + deltaLon]);
           }
-          features.push({ title, priority, coords });
+          features.push({ title, priority, coords, sourceDataset });
         }
         segments.push({ bounds: segBounds, features });
       }
@@ -171,6 +480,11 @@
     const featuresLayer = L.layerGroup().addTo(map);
     // Track segments that are currently rendered, keyed by segment index.
     const renderedSegments = {};
+    let hasLoadedDataset = false;
+    let mapListenersSet = false;
+    const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
+    const lineWeight = isCoarsePointer ? 9 : 6;
+    const lineTolerance = isCoarsePointer ? 12 : 6;
 
     // Return a color based on feature priority.
     function getPriorityColor(priority) {
@@ -182,17 +496,51 @@
       }
     }
 
+    const datasetInfo = {
+      0: { label: 'Active Travelways', itemId: 'a3631c7664ef4ecb93afb1ea4c12022b_0' },
+      1: { label: 'Bike Infrastructure', itemId: '460bba0983504ff9a3d74f144128b1ad_0' },
+      2: { label: 'Ice Routes', itemId: 'e9dd1561e22e4a149c5b45f54ec0942d_0' }
+    };
+    let currentDatasetCode = 0;
+
+    function featureMidpoint(coords) {
+      if (!coords || coords.length === 0) return null;
+      return coords[Math.floor(coords.length / 2)];
+    }
+
+    function datasetExploreUrl(datasetCode, coords, zoom) {
+      const info = datasetInfo[datasetCode];
+      if (!info || !coords) return null;
+      const lat = coords[0].toFixed(6);
+      const lon = coords[1].toFixed(6);
+      const z = (zoom || 21).toFixed(2);
+      return `https://data-hrm.hub.arcgis.com/datasets/${info.itemId}/explore?location=${lat}%2C${lon}%2C${z}`;
+    }
+
+    function datasetLabel(datasetCode) {
+      const info = datasetInfo[datasetCode];
+      return info ? info.label : 'Unknown dataset';
+    }
+
     function getPopupContent(segmentIdx, featureIdx) {
       const segment = allSegments[segmentIdx];
       if (!segment) return "Unknown segment";
       const feature = segment.features[featureIdx];
       if (!feature) return "Unknown feature";
       const priorityDetails = window.priorities[feature.priority];
+      const midpoint = featureMidpoint(feature.coords);
+      const featureLink = datasetExploreUrl(currentDatasetCode, midpoint);
+      const sourceLink = datasetExploreUrl(feature.sourceDataset, midpoint);
+      const featureLabel = datasetLabel(currentDatasetCode);
+      const sourceLabel = datasetLabel(feature.sourceDataset);
+      const showSource = feature.sourceDataset !== currentDatasetCode;
       return `
         ${feature.title || 'Unknown'}<br>
         <strong>Priority:</strong> ${feature.priority}<br>
         <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
-        <strong>Timeline:</strong> ${priorityDetails.Timeline} hours
+        <strong>Timeline:</strong> ${priorityDetails.Timeline} hours<br>
+        <strong>Dataset:</strong> ${featureLink ? `<a href="${featureLink}" target="_blank" rel="noopener">${featureLabel}</a>` : featureLabel}
+        ${showSource ? `<br><strong>Priority source:</strong> ${sourceLink ? `<a href="${sourceLink}" target="_blank" rel="noopener">${sourceLabel}</a>` : sourceLabel}` : ''}
       `;
     }
 
@@ -210,7 +558,14 @@
             segment.features.forEach((feature, featureIdx) => {
               const color = getPriorityColor(feature.priority);
               const priorityDetails = window.priorities[feature.priority];
-              const polyline = L.polyline(feature.coords, { color, weight: 6 })
+              const polyline = L.polyline(feature.coords, {
+                color,
+                weight: lineWeight,
+                lineCap: 'round',
+                lineJoin: 'round',
+                interactive: true,
+                tolerance: lineTolerance
+              })
                 .bindPopup(function() {
                    return getPopupContent(segmentIdx, featureIdx);
                  });
@@ -232,7 +587,17 @@
     /**
      * Load and render segmented features from the binary file.
      */
-    async function loadAndRenderSegmentedFeatures(url) {
+    function resetRenderedFeatures() {
+      Object.values(renderedSegments).forEach(layer => featuresLayer.removeLayer(layer));
+      for (const key in renderedSegments) {
+        delete renderedSegments[key];
+      }
+      featuresLayer.clearLayers();
+      allSegments = [];
+    }
+
+    async function loadAndRenderSegmentedFeatures(url, options) {
+      const opts = options || {};
       try {
         const response = await fetch(url);
         const arrayBuffer = await response.arrayBuffer();
@@ -244,17 +609,22 @@
         // Compute global bounds from all segments.
         const globalBounds = L.latLngBounds();
         allSegments.forEach(segment => globalBounds.extend(segment.bounds));
-        if (savedState) {
-          map.setView(savedState.center, savedState.zoom);
-        } else {
-          map.fitBounds(globalBounds);
+        if (!opts.preserveView) {
+          if (savedState) {
+            map.setView(savedState.center, savedState.zoom);
+          } else if (opts.fitBounds !== false) {
+            map.fitBounds(globalBounds);
+          }
         }
         updateVisibleFeatures();
         // Update visible segments when the map moves or zooms.
-        map.on('moveend zoomend', () => {
-          saveMapState(map);
-          updateVisibleFeatures();
-        });
+        if (!mapListenersSet) {
+          map.on('moveend', () => {
+            saveMapState(map);
+            updateVisibleFeatures();
+          });
+          mapListenersSet = true;
+        }
       } catch (error) {
         console.error("Error rendering segmented features:", error);
       }
@@ -291,8 +661,94 @@
             </div>
           `)
           .join('');
-        // Load and render the segmented features.
-        loadAndRenderSegmentedFeatures('features.bin');
+        const mobileControls = document.getElementById('mobile-controls');
+        const quickButtons = mobileControls.querySelectorAll('button[data-mode]');
+        const gearToggle = document.getElementById('gear-toggle');
+        const aboutToggle = document.getElementById('about-toggle');
+        const aboutPanel = document.getElementById('about-panel');
+        const aboutClose = document.getElementById('about-close');
+        const datasetConfig = {
+          sidewalks: { url: 'features.bin', datasetCode: 0 },
+          cycling: { url: 'features_cycling.bin', datasetCode: 1 }
+        };
+        const storedDataset = localStorage.getItem('datasetMode');
+        const initialDataset = datasetConfig[storedDataset] ? storedDataset : 'sidewalks';
+
+        function updateQuickToggle(mode) {
+          quickButtons.forEach(button => {
+            const active = button.dataset.mode === mode;
+            button.classList.toggle('is-active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+          });
+        }
+
+        function updateQuickLabels() {
+          quickButtons.forEach(button => {
+            button.textContent = button.dataset.full;
+          });
+        }
+
+        function loadDataset(mode) {
+          const config = datasetConfig[mode];
+          if (!config) {
+            console.error("Unknown dataset:", mode);
+            return;
+          }
+          currentDatasetCode = config.datasetCode;
+          resetRenderedFeatures();
+          const isInitialLoad = !hasLoadedDataset;
+          const fitBounds = !savedState && isInitialLoad;
+          const preserveView = !isInitialLoad;
+          hasLoadedDataset = true;
+          loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
+          updateQuickToggle(mode);
+        }
+
+        quickButtons.forEach(button => {
+          button.addEventListener('click', () => {
+            const mode = button.dataset.mode;
+            localStorage.setItem('datasetMode', mode);
+            loadDataset(mode);
+          });
+        });
+        const storedExpanded = localStorage.getItem('mobileExpanded') === '1';
+        if (storedExpanded) {
+          document.body.classList.add('mobile-expanded');
+        }
+        updateQuickLabels();
+        gearToggle.addEventListener('click', () => {
+          document.body.classList.toggle('mobile-expanded');
+          localStorage.setItem('mobileExpanded', document.body.classList.contains('mobile-expanded') ? '1' : '0');
+          updateQuickLabels();
+        });
+        window.addEventListener('resize', updateQuickLabels);
+
+        // Load and render the initial dataset.
+        loadDataset(initialDataset);
+
+        function setAboutOpen(isOpen) {
+          aboutPanel.classList.toggle('is-open', isOpen);
+          aboutPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+          aboutToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+          if (isOpen) {
+            aboutClose.focus();
+          } else {
+            aboutToggle.focus();
+          }
+        }
+
+        aboutToggle.addEventListener('click', () => setAboutOpen(true));
+        aboutClose.addEventListener('click', () => setAboutOpen(false));
+        aboutPanel.addEventListener('click', (event) => {
+          if (event.target === aboutPanel) {
+            setAboutOpen(false);
+          }
+        });
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape' && aboutPanel.classList.contains('is-open')) {
+            setAboutOpen(false);
+          }
+        });
       })
       .catch(error => console.error("Error loading priorities:", error));
   </script>
