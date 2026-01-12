@@ -722,14 +722,25 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 		return err
 	}
 
-	cellWidth := (globalMaxLon - globalMinLon) / float64(cols)
-	cellHeight := (globalMaxLat - globalMinLat) / float64(rows)
-
 	for _, seg := range segments {
-		segMinLon := globalMinLon + float64(seg.col)*cellWidth
-		segMinLat := globalMinLat + float64(seg.row)*cellHeight
-		segMaxLon := segMinLon + cellWidth
-		segMaxLat := segMinLat + cellHeight
+		segMinLon, segMinLat := math.MaxFloat64, math.MaxFloat64
+		segMaxLon, segMaxLat := -math.MaxFloat64, -math.MaxFloat64
+		for _, feature := range seg.features {
+			for _, coord := range feature.coords {
+				if coord[0] < segMinLon {
+					segMinLon = coord[0]
+				}
+				if coord[0] > segMaxLon {
+					segMaxLon = coord[0]
+				}
+				if coord[1] < segMinLat {
+					segMinLat = coord[1]
+				}
+				if coord[1] > segMaxLat {
+					segMaxLat = coord[1]
+				}
+			}
+		}
 
 		deltaMinLon := int32(math.Round((segMinLon - globalMinLon) * 1000000))
 		deltaMinLat := int32(math.Round((segMinLat - globalMinLat) * 1000000))
