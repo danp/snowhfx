@@ -30,6 +30,7 @@ type decodedFeature struct {
 	title         string
 	priority      uint8
 	sourceDataset uint8
+	routeID       uint16
 	coords        [][]float64
 }
 
@@ -61,6 +62,30 @@ func readFeaturesBin(t *testing.T, path string) []decodedFeature {
 	}
 	if err := binary.Read(r, binary.LittleEndian, &globalMinLat); err != nil {
 		t.Fatalf("read global min lat: %v", err)
+	}
+	var routeCount uint16
+	if err := binary.Read(r, binary.LittleEndian, &routeCount); err != nil {
+		t.Fatalf("read route count: %v", err)
+	}
+	for i := uint16(0); i < routeCount; i++ {
+		var maintLen uint8
+		if err := binary.Read(r, binary.LittleEndian, &maintLen); err != nil {
+			t.Fatalf("read maint len: %v", err)
+		}
+		if maintLen > 0 {
+			if _, err := r.Seek(int64(maintLen), 1); err != nil {
+				t.Fatalf("skip maint: %v", err)
+			}
+		}
+		var routeLen uint8
+		if err := binary.Read(r, binary.LittleEndian, &routeLen); err != nil {
+			t.Fatalf("read route len: %v", err)
+		}
+		if routeLen > 0 {
+			if _, err := r.Seek(int64(routeLen), 1); err != nil {
+				t.Fatalf("skip route: %v", err)
+			}
+		}
 	}
 
 	var out []decodedFeature
@@ -105,6 +130,10 @@ func readFeaturesBin(t *testing.T, path string) []decodedFeature {
 			if err := binary.Read(r, binary.LittleEndian, &sourceDataset); err != nil {
 				t.Fatalf("read source dataset: %v", err)
 			}
+			var routeID uint16
+			if err := binary.Read(r, binary.LittleEndian, &routeID); err != nil {
+				t.Fatalf("read route id: %v", err)
+			}
 			var coordCount uint16
 			if err := binary.Read(r, binary.LittleEndian, &coordCount); err != nil {
 				t.Fatalf("read coord count: %v", err)
@@ -126,6 +155,7 @@ func readFeaturesBin(t *testing.T, path string) []decodedFeature {
 				title:         string(titleBytes),
 				priority:      priority,
 				sourceDataset: sourceDataset,
+				routeID:       routeID,
 				coords:        coords,
 			})
 		}

@@ -108,16 +108,18 @@ func run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 	travelwayTitles := travelwayTitleMap(travelwaysFeatures)
+	travelwayRoutes := travelwayRouteMap(travelwaysFeatures)
 	iceLines, err := iceRouteLines(iceFC)
 	if err != nil {
 		return err
 	}
+	iceRoutes := iceRouteMap(iceFC)
 	iceIndex, err := newSpatialIndex(iceLines, 48, 24)
 	if err != nil {
 		return err
 	}
 
-	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, noPlowIndex, iceIndex, cfg.MaxMatchMeters, cfg.MaxAngleDeg, cfg.MaxOverallAngleDeg, cfg.PriorityBiasMeters, &debugEntries)
+	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, travelwayRoutes, iceRoutes, noPlowIndex, iceIndex, cfg.MaxMatchMeters, cfg.MaxAngleDeg, cfg.MaxOverallAngleDeg, cfg.PriorityBiasMeters, &debugEntries)
 	if err != nil {
 		return err
 	}
@@ -148,6 +150,9 @@ type lineFeature struct {
 	coords        orb.LineString
 	sourceDataset uint8
 	objectID      int
+	wintMaint     string
+	wintRoute     string
+	routeID       uint16
 }
 
 type debugEntry struct {
@@ -234,6 +239,8 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 		objectID := props.MustInt("OBJECTID", 0)
 		wintPlow := strings.TrimSpace(props.MustString("WINT_PLOW", ""))
 		wintLOS := strings.TrimSpace(props.MustString("WINT_LOS", ""))
+		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
+		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
 		owner := strings.TrimSpace(props.MustString("OWNER", ""))
 		if isPrivateOwner(owner) {
 			appendDebug(debug, debugEntry{
@@ -311,6 +318,8 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 			coords:        ls,
 			sourceDataset: datasetTravelways,
 			objectID:      objectID,
+			wintMaint:     wintMaint,
+			wintRoute:     wintRoute,
 		})
 		appendDebug(debug, debugEntry{
 			Dataset:  "travelways",
@@ -340,6 +349,28 @@ func travelwayTitleMap(features []lineFeature) map[int]string {
 		titles[feature.objectID] = feature.title
 	}
 	return titles
+}
+
+type routeInfo struct {
+	maint string
+	route string
+}
+
+func travelwayRouteMap(features []lineFeature) map[int]routeInfo {
+	routes := make(map[int]routeInfo, len(features))
+	for _, feature := range features {
+		if feature.objectID == 0 {
+			continue
+		}
+		if feature.wintMaint == "" && feature.wintRoute == "" {
+			continue
+		}
+		routes[feature.objectID] = routeInfo{
+			maint: feature.wintMaint,
+			route: feature.wintRoute,
+		}
+	}
+	return routes
 }
 
 func travelwayNoPlowLines(fc *geojson.FeatureCollection) []indexedLine {
@@ -445,7 +476,7 @@ func bikeTitle(props geojson.Properties, titles *titleNormalizer) (string, bool)
 	return title, true
 }
 
-func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelwaysIndex *spatialIndex, travelwayTitles map[int]string, noPlowIndex, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
+func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelwaysIndex *spatialIndex, travelwayTitles map[int]string, travelwayRoutes map[int]routeInfo, iceRoutes map[int]routeInfo, noPlowIndex, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
 	var (
 		matchedTravelways int
 		matchedIce        int
@@ -503,11 +534,14 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		}
 
 		title, titleFromType := bikeTitle(props, titles)
+		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
+		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
 		var (
 			priority      uint8
 			matchDistance float64
 			sourceDataset uint8
 			travelwayID   int
+			iceRouteID    int
 			found         bool
 			reason        string
 		)
@@ -561,6 +595,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			found = match.hasMatch
 			if found {
 				sourceDataset = datasetIce
+				iceRouteID = match.objectID
 				reason = "matched ice"
 				matchedIce++
 			}
@@ -583,6 +618,18 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				if travelwayTitle := travelwayTitles[travelwayID]; travelwayTitle != "" {
 					title = travelwayTitle
 				}
+			}
+		}
+		if (wintMaint == "" && wintRoute == "") && travelwayID != 0 {
+			if info, ok := travelwayRoutes[travelwayID]; ok {
+				wintMaint = info.maint
+				wintRoute = info.route
+			}
+		}
+		if (wintMaint == "" && wintRoute == "") && iceRouteID != 0 {
+			if info, ok := iceRoutes[iceRouteID]; ok {
+				wintMaint = info.maint
+				wintRoute = info.route
 			}
 		}
 		if !found {
@@ -610,6 +657,8 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			priority:      priority,
 			coords:        ls,
 			sourceDataset: sourceDataset,
+			wintMaint:     wintMaint,
+			wintRoute:     wintRoute,
 		})
 		appendDebug(debug, debugEntry{
 			Dataset:       "bike",
@@ -680,6 +729,7 @@ func iceRouteLines(fc *geojson.FeatureCollection) ([]indexedLine, error) {
 	lines := make([]indexedLine, 0, len(fc.Features))
 	for _, f := range fc.Features {
 		props := f.Properties
+		objectID := props.MustInt("OBJECTID", 0)
 		priorityStr := strings.TrimSpace(props.MustString("PRIORITY", ""))
 		if priorityStr == "" {
 			continue
@@ -700,6 +750,7 @@ func iceRouteLines(fc *geojson.FeatureCollection) ([]indexedLine, error) {
 		lines = append(lines, indexedLine{
 			coords:   ls,
 			priority: uint8(priorityNum),
+			objectID: objectID,
 		})
 	}
 
@@ -708,6 +759,24 @@ func iceRouteLines(fc *geojson.FeatureCollection) ([]indexedLine, error) {
 	}
 
 	return lines, nil
+}
+
+func iceRouteMap(fc *geojson.FeatureCollection) map[int]routeInfo {
+	routes := make(map[int]routeInfo, len(fc.Features))
+	for _, f := range fc.Features {
+		props := f.Properties
+		objectID := props.MustInt("OBJECTID", 0)
+		if objectID == 0 {
+			continue
+		}
+		maint := strings.TrimSpace(props.MustString("OPERATOR", ""))
+		route := strings.TrimSpace(props.MustString("ROUTE_NAME", ""))
+		if maint == "" && route == "" {
+			continue
+		}
+		routes[objectID] = routeInfo{maint: maint, route: route}
+	}
+	return routes
 }
 
 func linesForIndex(features []lineFeature) []indexedLine {
@@ -753,6 +822,8 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 		repLon, repLat float64
 	}
 	var featuresForSeg []featureForSeg
+	routeEntries := make([]routeInfo, 0)
+	routeIndex := make(map[routeInfo]uint16)
 
 	for _, feature := range features {
 		ls := feature.coords
@@ -775,6 +846,21 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 			}
 		}
 
+		var routeID uint16
+		if feature.wintMaint != "" || feature.wintRoute != "" {
+			key := routeInfo{maint: feature.wintMaint, route: feature.wintRoute}
+			if id, ok := routeIndex[key]; ok {
+				routeID = id
+			} else {
+				if len(routeEntries) >= math.MaxUint16 {
+					return fmt.Errorf("too many winter routes: %d exceeds uint16 capacity", len(routeEntries)+1)
+				}
+				routeEntries = append(routeEntries, key)
+				routeID = uint16(len(routeEntries))
+				routeIndex[key] = routeID
+			}
+		}
+		feature.routeID = routeID
 		repLon, repLat := ls[0][0], ls[0][1]
 		featuresForSeg = append(featuresForSeg, featureForSeg{
 			data:   feature,
@@ -848,6 +934,31 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 	if err := binary.Write(writer, binary.LittleEndian, globalMinLat); err != nil {
 		return err
 	}
+	if err := binary.Write(writer, binary.LittleEndian, uint16(len(routeEntries))); err != nil {
+		return err
+	}
+	for _, entry := range routeEntries {
+		maintBytes := []byte(entry.maint)
+		if len(maintBytes) > 255 {
+			return fmt.Errorf("WINT_MAINT too long: %q exceeds 255 bytes", entry.maint)
+		}
+		routeBytes := []byte(entry.route)
+		if len(routeBytes) > 255 {
+			return fmt.Errorf("WINT_ROUTE too long: %q exceeds 255 bytes", entry.route)
+		}
+		if err := binary.Write(writer, binary.LittleEndian, uint8(len(maintBytes))); err != nil {
+			return err
+		}
+		if _, err := writer.Write(maintBytes); err != nil {
+			return err
+		}
+		if err := binary.Write(writer, binary.LittleEndian, uint8(len(routeBytes))); err != nil {
+			return err
+		}
+		if _, err := writer.Write(routeBytes); err != nil {
+			return err
+		}
+	}
 
 	for _, seg := range segments {
 		segMinLon, segMinLat := math.MaxFloat64, math.MaxFloat64
@@ -905,6 +1016,9 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 				return err
 			}
 			if err := binary.Write(writer, binary.LittleEndian, f.sourceDataset); err != nil {
+				return err
+			}
+			if err := binary.Write(writer, binary.LittleEndian, f.routeID); err != nil {
 				return err
 			}
 
