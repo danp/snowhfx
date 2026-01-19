@@ -503,12 +503,16 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		if isProtectedBike(props) {
 			var noPlowObjectID int
 			var noPlowDistance float64
+			var travelwayNearest nearestMatchResult
 			if noPlowIndex != nil {
 				match := noPlowIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
 				noPlowObjectID = match.objectID
 				noPlowDistance = match.distance
 			}
-			if noPlowObjectID != 0 {
+			if travelwaysIndex != nil {
+				travelwayNearest = travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
+			}
+			if noPlowObjectID != 0 && (!travelwayNearest.hasMatch || noPlowDistance <= travelwayNearest.distance) {
 				skippedNoPlowTW++
 				appendDebug(debug, debugEntry{
 					Dataset:        "bike",
