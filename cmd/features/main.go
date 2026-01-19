@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/geojson"
@@ -84,7 +85,10 @@ func main() {
 	}
 
 	var debugEntries []debugEntry
-	travelwaysFeatures, err := travelwayLines(travelwaysFC, &debugEntries)
+	titleNormalizer := newTitleNormalizer()
+	seedTitleNormalizerFromTravelways(travelwaysFC, titleNormalizer)
+	seedTitleNormalizerFromBike(bikeFC, titleNormalizer)
+	travelwaysFeatures, err := travelwayLines(travelwaysFC, titleNormalizer, &debugEntries)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -93,6 +97,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	travelwayTitles := travelwayTitleMap(travelwaysFeatures)
 	iceLines, err := iceRouteLines(iceFC)
 	if err != nil {
 		log.Fatal(err)
@@ -102,7 +107,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	bikeFeatures, err := bikeLines(bikeFC, travelwaysIndex, noPlowIndex, iceIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters, &debugEntries)
+	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, noPlowIndex, iceIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters, &debugEntries)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -131,6 +136,7 @@ type lineFeature struct {
 	priority      uint8
 	coords        orb.LineString
 	sourceDataset uint8
+	objectID      int
 }
 
 type debugEntry struct {
@@ -209,7 +215,7 @@ func datasetName(code uint8) string {
 	}
 }
 
-func travelwayLines(fc *geojson.FeatureCollection, debug *[]debugEntry) ([]lineFeature, error) {
+func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debug *[]debugEntry) ([]lineFeature, error) {
 	features := make([]lineFeature, 0, len(fc.Features))
 	skippedNoPlow := 0
 	for _, f := range fc.Features {
@@ -284,15 +290,16 @@ func travelwayLines(fc *geojson.FeatureCollection, debug *[]debugEntry) ([]lineF
 			continue
 		}
 
-		title := props.MustString("LOCATION", "")
-		if title == "CORNWALLIS ST" {
-			title = "NORA BERNARD ST"
+		title := titles.normalize(props.MustString("LOCATION", ""))
+		if strings.EqualFold(title, "CORNWALLIS ST") {
+			title = titles.normalize("Nora Bernard St")
 		}
 		features = append(features, lineFeature{
 			title:         title,
 			priority:      priority,
 			coords:        ls,
 			sourceDataset: datasetTravelways,
+			objectID:      objectID,
 		})
 		appendDebug(debug, debugEntry{
 			Dataset:  "travelways",
@@ -311,6 +318,17 @@ func travelwayLines(fc *geojson.FeatureCollection, debug *[]debugEntry) ([]lineF
 		log.Printf("travelways skipped not plowed=%d", skippedNoPlow)
 	}
 	return features, nil
+}
+
+func travelwayTitleMap(features []lineFeature) map[int]string {
+	titles := make(map[int]string, len(features))
+	for _, feature := range features {
+		if feature.objectID == 0 || feature.title == "" {
+			continue
+		}
+		titles[feature.objectID] = feature.title
+	}
+	return titles
 }
 
 func travelwayNoPlowLines(fc *geojson.FeatureCollection) []indexedLine {
@@ -338,7 +356,85 @@ func travelwayNoPlowLines(fc *geojson.FeatureCollection) []indexedLine {
 	return lines
 }
 
-func bikeLines(fc *geojson.FeatureCollection, travelwaysIndex, noPlowIndex, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
+func seedTitleNormalizerFromTravelways(fc *geojson.FeatureCollection, titles *titleNormalizer) {
+	for _, f := range fc.Features {
+		props := f.Properties
+		titles.observe(props.MustString("LOCATION", ""))
+	}
+}
+
+func seedTitleNormalizerFromBike(fc *geojson.FeatureCollection, titles *titleNormalizer) {
+	for _, f := range fc.Features {
+		props := f.Properties
+		titles.observe(props.MustString("BIKE_NAME", ""))
+		titles.observe(props.MustString("STREETNAME", ""))
+	}
+}
+
+type titleNormalizer struct {
+	bestByLower map[string]string
+}
+
+func newTitleNormalizer() *titleNormalizer {
+	return &titleNormalizer{
+		bestByLower: make(map[string]string),
+	}
+}
+
+func (t *titleNormalizer) observe(value string) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return
+	}
+	key := strings.ToLower(raw)
+	if best, ok := t.bestByLower[key]; ok {
+		if isAllUpper(best) && !isAllUpper(raw) {
+			t.bestByLower[key] = raw
+		}
+		return
+	}
+	t.bestByLower[key] = raw
+}
+
+func (t *titleNormalizer) normalize(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	key := strings.ToLower(raw)
+	if best, ok := t.bestByLower[key]; ok {
+		return best
+	}
+	return raw
+}
+
+func isAllUpper(value string) bool {
+	hasLetter := false
+	for _, r := range value {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if unicode.IsLower(r) {
+				return false
+			}
+		}
+	}
+	return hasLetter
+}
+
+func bikeTitle(props geojson.Properties, titles *titleNormalizer) (string, bool) {
+	title := titles.normalize(props.MustString("BIKE_NAME", ""))
+	if title != "" {
+		return title, false
+	}
+	title = titles.normalize(props.MustString("STREETNAME", ""))
+	if title != "" {
+		return title, false
+	}
+	title = titles.normalize(props.MustString("BIKETYPE", ""))
+	return title, true
+}
+
+func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelwaysIndex *spatialIndex, travelwayTitles map[int]string, noPlowIndex, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
 	var (
 		matchedTravelways int
 		matchedIce        int
@@ -395,17 +491,12 @@ func bikeLines(fc *geojson.FeatureCollection, travelwaysIndex, noPlowIndex, iceI
 			continue
 		}
 
-		title := strings.TrimSpace(props.MustString("BIKE_NAME", ""))
-		if title == "" {
-			title = strings.TrimSpace(props.MustString("STREETNAME", ""))
-		}
-		if title == "" {
-			title = strings.TrimSpace(props.MustString("BIKETYPE", ""))
-		}
+		title, titleFromType := bikeTitle(props, titles)
 		var (
 			priority      uint8
 			matchDistance float64
 			sourceDataset uint8
+			travelwayID   int
 			found         bool
 			reason        string
 		)
@@ -413,7 +504,9 @@ func bikeLines(fc *geojson.FeatureCollection, travelwaysIndex, noPlowIndex, iceI
 			var noPlowObjectID int
 			var noPlowDistance float64
 			if noPlowIndex != nil {
-				noPlowObjectID, noPlowDistance, _ = noPlowIndex.nearestMatchID(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad)
+				match := noPlowIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
+				noPlowObjectID = match.objectID
+				noPlowDistance = match.distance
 			}
 			if noPlowObjectID != 0 {
 				skippedNoPlowTW++
@@ -436,14 +529,21 @@ func bikeLines(fc *geojson.FeatureCollection, travelwaysIndex, noPlowIndex, iceI
 				})
 				continue
 			}
-			priority, matchDistance, found = travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
+			match := travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
+			priority = match.priority
+			travelwayID = match.objectID
+			matchDistance = match.distance
+			found = match.hasMatch
 			if found {
 				sourceDataset = datasetTravelways
 				reason = "matched travelways"
 				matchedTravelways++
 			}
 		} else {
-			priority, matchDistance, found = iceIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
+			match := iceIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
+			priority = match.priority
+			matchDistance = match.distance
+			found = match.hasMatch
 			if found {
 				sourceDataset = datasetIce
 				reason = "matched ice"
@@ -457,6 +557,17 @@ func bikeLines(fc *geojson.FeatureCollection, travelwaysIndex, noPlowIndex, iceI
 				reason = "fallback WINT_LOS"
 				matchedFallback++
 				found = true
+			}
+		}
+		if titleFromType && travelwaysIndex != nil {
+			if travelwayID == 0 {
+				match := travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
+				travelwayID = match.objectID
+			}
+			if travelwayID != 0 {
+				if travelwayTitle := travelwayTitles[travelwayID]; travelwayTitle != "" {
+					title = travelwayTitle
+				}
 			}
 		}
 		if !found {
@@ -590,6 +701,7 @@ func linesForIndex(features []lineFeature) []indexedLine {
 		lines = append(lines, indexedLine{
 			coords:   f.coords,
 			priority: f.priority,
+			objectID: f.objectID,
 		})
 	}
 	return lines
@@ -931,6 +1043,13 @@ type spatialIndex struct {
 	projector projector
 }
 
+type nearestMatchResult struct {
+	priority uint8
+	objectID int
+	distance float64
+	hasMatch bool
+}
+
 type cellKey struct {
 	row, col int
 }
@@ -1037,9 +1156,9 @@ func newSpatialIndex(lines []indexedLine, cols, rows int) (*spatialIndex, error)
 	return idx, nil
 }
 
-func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters float64) (uint8, float64, bool) {
+func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters float64) nearestMatchResult {
 	if len(line) == 0 {
-		return 0, 0, false
+		return nearestMatchResult{}
 	}
 
 	minLon, minLat, maxLon, maxLat := lineBounds(line)
@@ -1050,7 +1169,7 @@ func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, ma
 
 	candidateIdxs := idx.candidates(minLon, minLat, maxLon, maxLat)
 	if len(candidateIdxs) == 0 {
-		return 0, 0, false
+		return nearestMatchResult{}
 	}
 
 	lineXY := idx.projector.lineToXY(line)
@@ -1070,7 +1189,7 @@ func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, ma
 	}
 
 	if minDistance > maxDistanceMeters {
-		return 0, 0, false
+		return nearestMatchResult{}
 	}
 	if priorityBiasMeters < 0 {
 		priorityBiasMeters = 0
@@ -1079,6 +1198,7 @@ func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, ma
 
 	bestDistance := math.Inf(1)
 	bestPriority := uint8(math.MaxUint8)
+	bestObjectID := 0
 	for _, i := range candidateIdxs {
 		candidate := idx.lines[i]
 		if maxOverallAngleRad > 0 && hasLineOverall && candidate.hasOverallAngle {
@@ -1093,52 +1213,19 @@ func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, ma
 		if candidate.priority < bestPriority || (candidate.priority == bestPriority && distance < bestDistance) {
 			bestPriority = candidate.priority
 			bestDistance = distance
+			bestObjectID = candidate.objectID
 		}
 	}
 
 	if bestDistance <= maxDistanceMeters {
-		return bestPriority, bestDistance, true
-	}
-	return 0, 0, false
-}
-
-func (idx *spatialIndex) nearestMatchID(line orb.LineString, maxDistanceMeters, maxAngleRad, maxOverallAngleRad float64) (int, float64, bool) {
-	if len(line) == 0 {
-		return 0, 0, false
-	}
-
-	minLon, minLat, maxLon, maxLat := lineBounds(line)
-	minLon -= metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
-	maxLon += metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
-	minLat -= metersToDegreesLat(maxDistanceMeters)
-	maxLat += metersToDegreesLat(maxDistanceMeters)
-
-	candidateIdxs := idx.candidates(minLon, minLat, maxLon, maxLat)
-	if len(candidateIdxs) == 0 {
-		return 0, 0, false
-	}
-
-	lineXY := idx.projector.lineToXY(line)
-	lineOverallAngle, hasLineOverall := overallLineAngle(lineXY)
-	bestDistance := math.Inf(1)
-	bestObjectID := 0
-	for _, i := range candidateIdxs {
-		candidate := idx.lines[i]
-		if maxOverallAngleRad > 0 && hasLineOverall && candidate.hasOverallAngle {
-			if angleDelta(lineOverallAngle, candidate.overallAngleRad) > maxOverallAngleRad {
-				continue
-			}
-		}
-		distance := minLineDistanceWithAngle(lineXY, candidate.xy, maxAngleRad)
-		if distance <= maxDistanceMeters && distance < bestDistance {
-			bestDistance = distance
-			bestObjectID = candidate.objectID
+		return nearestMatchResult{
+			priority: bestPriority,
+			objectID: bestObjectID,
+			distance: bestDistance,
+			hasMatch: true,
 		}
 	}
-	if bestObjectID == 0 {
-		return 0, 0, false
-	}
-	return bestObjectID, bestDistance, true
+	return nearestMatchResult{}
 }
 
 func (idx *spatialIndex) candidates(minLon, minLat, maxLon, maxLat float64) []int {
