@@ -1,5 +1,6 @@
 events
 *.db
 features*.bin
-travelways.geojson
+*.geojson
+debug*.json
 tmp

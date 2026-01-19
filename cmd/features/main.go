@@ -40,39 +40,49 @@ func main() {
 	ctx := context.Background()
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	var travelwaysFile string
-	var bikeFile string
-	var iceFile string
-	var travelwaysOut string
-	var bikeOut string
-	var maxMatchMeters float64
-	var maxAngleDeg float64
-	var maxOverallAngleDeg float64
-	var priorityBiasMeters float64
-	var debugOut string
-	fs.StringVar(&travelwaysFile, "travelways", "", "path to travelways geojson file, otherwise download")
-	fs.StringVar(&bikeFile, "bike", "", "path to bike infrastructure geojson file, otherwise download")
-	fs.StringVar(&iceFile, "ice", "", "path to ice routes geojson file, otherwise download")
-	fs.StringVar(&travelwaysOut, "out-travelways", defaultTravelwaysOut, "path to write travelways features bin")
-	fs.StringVar(&bikeOut, "out-bike", defaultBikeOut, "path to write bike infrastructure features bin")
-	fs.Float64Var(&maxMatchMeters, "max-match-meters", 30, "max distance in meters to match bike routes to travelways or ice routes")
-	fs.Float64Var(&maxAngleDeg, "max-angle-deg", 30, "max angle delta in degrees for matching bike routes to other datasets")
-	fs.Float64Var(&maxOverallAngleDeg, "max-overall-angle-deg", 60, "max angle delta in degrees between overall line directions")
-	fs.Float64Var(&priorityBiasMeters, "priority-bias-meters", 1, "distance window to prefer higher priority matches over the nearest line")
-	fs.StringVar(&debugOut, "debug-out", "", "path to write debug json with decision details")
+	cfg := runConfig{}
+	fs.StringVar(&cfg.TravelwaysFile, "travelways", "", "path to travelways geojson file, otherwise download")
+	fs.StringVar(&cfg.BikeFile, "bike", "", "path to bike infrastructure geojson file, otherwise download")
+	fs.StringVar(&cfg.IceFile, "ice", "", "path to ice routes geojson file, otherwise download")
+	fs.StringVar(&cfg.TravelwaysOut, "out-travelways", defaultTravelwaysOut, "path to write travelways features bin")
+	fs.StringVar(&cfg.BikeOut, "out-bike", defaultBikeOut, "path to write bike infrastructure features bin")
+	fs.Float64Var(&cfg.MaxMatchMeters, "max-match-meters", 30, "max distance in meters to match bike routes to travelways or ice routes")
+	fs.Float64Var(&cfg.MaxAngleDeg, "max-angle-deg", 30, "max angle delta in degrees for matching bike routes to other datasets")
+	fs.Float64Var(&cfg.MaxOverallAngleDeg, "max-overall-angle-deg", 60, "max angle delta in degrees between overall line directions")
+	fs.Float64Var(&cfg.PriorityBiasMeters, "priority-bias-meters", 1, "distance window to prefer higher priority matches over the nearest line")
+	fs.StringVar(&cfg.DebugOut, "debug-out", "", "path to write debug json with decision details")
 	fs.Parse(os.Args[1:])
 
-	travelwaysFC, err := loadFeatureCollection(ctx, travelwaysFile, activeTravelwaysItemID)
-	if err != nil {
+	if err := run(ctx, cfg); err != nil {
 		log.Fatal(err)
 	}
-	bikeFC, err := loadFeatureCollection(ctx, bikeFile, bikeInfraItemID)
+}
+
+type runConfig struct {
+	TravelwaysFile     string
+	BikeFile           string
+	IceFile            string
+	TravelwaysOut      string
+	BikeOut            string
+	MaxMatchMeters     float64
+	MaxAngleDeg        float64
+	MaxOverallAngleDeg float64
+	PriorityBiasMeters float64
+	DebugOut           string
+}
+
+func run(ctx context.Context, cfg runConfig) error {
+	travelwaysFC, err := loadFeatureCollection(ctx, cfg.TravelwaysFile, activeTravelwaysItemID)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	iceFC, err := loadFeatureCollection(ctx, iceFile, iceRoutesItemID)
+	bikeFC, err := loadFeatureCollection(ctx, cfg.BikeFile, bikeInfraItemID)
 	if err != nil {
-		log.Fatal(err)
+		return err
+	}
+	iceFC, err := loadFeatureCollection(ctx, cfg.IceFile, iceRoutesItemID)
+	if err != nil {
+		return err
 	}
 
 	noPlowTravelways := travelwayNoPlowLines(travelwaysFC)
@@ -80,7 +90,7 @@ func main() {
 	if len(noPlowTravelways) > 0 {
 		noPlowIndex, err = newSpatialIndex(noPlowTravelways, 48, 24)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 
@@ -90,45 +100,46 @@ func main() {
 	seedTitleNormalizerFromBike(bikeFC, titleNormalizer)
 	travelwaysFeatures, err := travelwayLines(travelwaysFC, titleNormalizer, &debugEntries)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	travelwaysIndex, err := newSpatialIndex(linesForIndex(travelwaysFeatures), 48, 24)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	travelwayTitles := travelwayTitleMap(travelwaysFeatures)
 	iceLines, err := iceRouteLines(iceFC)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	iceIndex, err := newSpatialIndex(iceLines, 48, 24)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
-	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, noPlowIndex, iceIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters, &debugEntries)
+	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, noPlowIndex, iceIndex, cfg.MaxMatchMeters, cfg.MaxAngleDeg, cfg.MaxOverallAngleDeg, cfg.PriorityBiasMeters, &debugEntries)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
-	if err := writeFeaturesBin(travelwaysOut, travelwaysFeatures); err != nil {
-		log.Fatal(err)
+	if err := writeFeaturesBin(cfg.TravelwaysOut, travelwaysFeatures); err != nil {
+		return err
 	}
-	if err := writeFeaturesBin(bikeOut, bikeFeatures); err != nil {
-		log.Fatal(err)
+	if err := writeFeaturesBin(cfg.BikeOut, bikeFeatures); err != nil {
+		return err
 	}
-	if debugOut != "" {
-		cfg := debugConfig{
-			MaxMatchMeters:     maxMatchMeters,
-			MaxAngleDeg:        maxAngleDeg,
-			MaxOverallAngleDeg: maxOverallAngleDeg,
-			PriorityBiasMeters: priorityBiasMeters,
+	if cfg.DebugOut != "" {
+		debugCfg := debugConfig{
+			MaxMatchMeters:     cfg.MaxMatchMeters,
+			MaxAngleDeg:        cfg.MaxAngleDeg,
+			MaxOverallAngleDeg: cfg.MaxOverallAngleDeg,
+			PriorityBiasMeters: cfg.PriorityBiasMeters,
 		}
-		if err := writeDebug(debugOut, debugEntries, cfg); err != nil {
-			log.Fatal(err)
+		if err := writeDebug(cfg.DebugOut, debugEntries, debugCfg); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 type lineFeature struct {
