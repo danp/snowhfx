@@ -245,6 +245,150 @@
       cursor: pointer;
       color: var(--text-primary);
     }
+    .report-panel {
+      position: fixed;
+      inset: 0;
+      background: rgba(7, 10, 12, 0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 2100;
+      padding: 16px;
+    }
+    .report-panel.is-open {
+      display: flex;
+    }
+    .report-card {
+      background: var(--control-bg);
+      color: var(--text-primary);
+      border: 1px solid var(--header-border);
+      border-radius: 14px;
+      max-width: 620px;
+      width: 100%;
+      padding: 18px;
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.4;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .report-header h2 {
+      font-size: 16px;
+      margin: 0 0 4px;
+    }
+    .report-subtitle {
+      margin: 0;
+      color: var(--text-muted);
+    }
+    .report-form {
+      display: grid;
+      gap: 12px;
+    }
+    .report-field label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .report-textarea {
+      border: 1px solid var(--control-border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      min-height: 80px;
+      font-family: inherit;
+      font-size: 13px;
+      color: var(--text-primary);
+      background: var(--control-bg);
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .report-email-body {
+      border: 1px solid var(--control-border);
+      border-radius: 10px;
+      padding: 8px 10px;
+      min-height: 120px;
+      font-family: inherit;
+      font-size: 12px;
+      color: var(--text-primary);
+      background: var(--control-bg);
+      width: 100%;
+      box-sizing: border-box;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .report-footer {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .report-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .report-email-link {
+      border: 1px solid #0f786f;
+      border-radius: 8px;
+      background: #0f786f;
+      color: #fff;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 600;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .report-copy {
+      border: 1px solid var(--control-border);
+      border-radius: 8px;
+      background: var(--control-bg);
+      color: var(--text-primary);
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .report-close {
+      border: 1px solid var(--control-border);
+      border-radius: 8px;
+      background: var(--control-bg);
+      color: var(--text-primary);
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .report-status-message {
+      font-size: 12px;
+      color: #0f786f;
+      font-weight: 600;
+      flex: 1 1 100%;
+      min-height: 16px;
+    }
+    .popup-311-button {
+      margin-top: 8px;
+      border: 1px solid #0f786f;
+      border-radius: 8px;
+      background: #0f786f;
+      color: #fff;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .leaflet-popup-content-wrapper,
+    .leaflet-popup-tip {
+      background: var(--control-bg);
+      color: var(--text-primary);
+      border: 1px solid var(--header-border);
+    }
+    .leaflet-popup-content-wrapper a {
+      color: var(--text-primary);
+    }
     @media (max-width: 480px) {
       .header {
         gap: 12px;
@@ -288,6 +432,9 @@
       }
       body.mobile-expanded .about-toggle {
         display: inline-flex;
+      }
+      .report-email-body {
+        min-height: 140px;
       }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -346,6 +493,32 @@
       </p>
       <div class="about-actions">
         <button class="about-close" id="about-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+  <div class="report-panel" id="report-panel" aria-hidden="true">
+    <div class="report-card" role="dialog" aria-modal="true" aria-labelledby="report-title">
+      <div class="report-header">
+        <h2 id="report-title">Report to 311</h2>
+        <p class="report-subtitle">Email contactus@311.halifax.ca about a missed clearing deadline.</p>
+      </div>
+      <div class="report-form" id="report-form">
+        <div class="report-field">
+          <label for="report-notes">What's wrong? (optional)</label>
+          <textarea class="report-textarea" id="report-notes" name="notes" placeholder="Add details like blocked curb cuts, ice buildup, or when you checked."></textarea>
+        </div>
+        <div class="report-field">
+          <label id="report-email-body-label">Email draft</label>
+          <pre class="report-email-body" id="report-email-body" aria-labelledby="report-email-body-label"></pre>
+        </div>
+        <div class="report-footer">
+          <span class="report-status-message" id="report-status-message" aria-live="polite"></span>
+          <div class="report-actions">
+            <a class="report-email-link" id="report-email-link" href="#" target="_blank" rel="noopener">Email 311</a>
+            <button class="report-copy" id="report-copy-body" type="button">Copy body</button>
+            <button class="report-close" id="report-close" type="button">Close</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -413,6 +586,11 @@
      * - uint32: numberOfSegments
      * - float64: globalBaseLon
      * - float64: globalBaseLat
+     * - uint16: numberOfRoutes
+     *   - uint8: maintLength
+     *   - [maintLength] bytes: WINT_MAINT string
+     *   - uint8: routeLength
+     *   - [routeLength] bytes: WINT_ROUTE string
      *
      * For each segment:
      *   - int32: segDeltaMinLon
@@ -426,6 +604,7 @@
      *     - [titleLength] bytes: title string
      *     - uint8: priority
      *     - uint8: sourceDataset
+     *     - uint16: routeID (0 = none)
      *     - uint16: coordinateCount
      *     - For each coordinate:
      *         - int32: deltaLon
@@ -442,6 +621,18 @@
       offset += 8;
       const baseLat = dataView.getFloat64(offset, true);
       offset += 8;
+      const routeCount = dataView.getUint16(offset, true);
+      offset += 2;
+      routeTable = [null];
+      for (let r = 0; r < routeCount; r++) {
+        const maintLength = dataView.getUint8(offset); offset += 1;
+        const maint = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, maintLength));
+        offset += maintLength;
+        const routeLength = dataView.getUint8(offset); offset += 1;
+        const route = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, routeLength));
+        offset += routeLength;
+        routeTable.push({ maint, route });
+      }
 
       const segments = [];
       for (let s = 0; s < segmentCount; s++) {
@@ -467,6 +658,7 @@
           // Read priority.
           const priority = dataView.getUint8(offset); offset += 1;
           const sourceDataset = dataView.getUint8(offset); offset += 1;
+          const routeID = dataView.getUint16(offset, true); offset += 2;
           // Read coordinate count.
           const coordCount = dataView.getUint16(offset, true); offset += 2;
           const coords = [];
@@ -476,7 +668,7 @@
             // Leaflet expects [lat, lon].
             coords.push([baseLat + deltaLat, baseLon + deltaLon]);
           }
-          features.push({ title, priority, coords, sourceDataset });
+          features.push({ title, priority, coords, sourceDataset, routeID });
         }
         segments.push({ bounds: segBounds, features });
       }
@@ -485,6 +677,8 @@
 
     // Global storage for segments and rendered segments.
     let allSegments = [];
+    let routeTable = [null];
+    let reportActions = { openFromFeature: null };
     const featuresLayer = L.layerGroup().addTo(map);
     // Track segments that are currently rendered, keyed by segment index.
     const renderedSegments = {};
@@ -510,6 +704,7 @@
       2: { label: 'Ice Routes', itemId: 'e9dd1561e22e4a149c5b45f54ec0942d_0' }
     };
     let currentDatasetCode = 0;
+    let currentDatasetMode = 'sidewalks';
 
     function featureMidpoint(coords) {
       if (!coords || coords.length === 0) return null;
@@ -530,6 +725,19 @@
       return info ? info.label : 'Unknown dataset';
     }
 
+    function isDeadlinePassed(details) {
+      if (!details || !details.Deadline) return false;
+      return new Date() > details.Deadline;
+    }
+
+    function travelwayTypeForFeature(feature) {
+      if (!feature) return 'Travelway';
+      if (currentDatasetMode === 'sidewalks') {
+        return 'Sidewalk/path';
+      }
+      return 'Bikeway/path/street';
+    }
+
     function getPopupContent(segmentIdx, featureIdx) {
       const segment = allSegments[segmentIdx];
       if (!segment) return "Unknown segment";
@@ -542,14 +750,25 @@
       const featureLabel = datasetLabel(currentDatasetCode);
       const sourceLabel = datasetLabel(feature.sourceDataset);
       const showSource = feature.sourceDataset !== currentDatasetCode;
+      const routeInfo = routeTable[feature.routeID];
+      const routeLabel = routeInfo ? [routeInfo.maint, routeInfo.route].filter(Boolean).join(' / ') : '';
+      const showReportButton = isDeadlinePassed(priorityDetails);
       return `
         ${feature.title || 'Unknown'}<br>
         <strong>Priority:</strong> ${feature.priority}<br>
         <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
         <strong>Timeline:</strong> ${priorityDetails.Timeline} hours<br>
+        ${routeLabel ? `<strong>Winter route:</strong> ${routeLabel}<br>` : ''}
         <strong>Dataset:</strong> ${featureLink ? `<a href="${featureLink}" target="_blank" rel="noopener">${featureLabel}</a>` : featureLabel}
         ${showSource ? `<br><strong>Priority source:</strong> ${sourceLink ? `<a href="${sourceLink}" target="_blank" rel="noopener">${sourceLabel}</a>` : sourceLabel}` : ''}
+        ${showReportButton ? `<br><button type="button" class="popup-311-button" data-seg="${segmentIdx}" data-feature="${featureIdx}">Report to 311</button>` : ''}
       `;
+    }
+
+    function getRouteLabel(routeID) {
+      const info = routeTable[routeID];
+      if (!info) return '';
+      return [info.maint, info.route].filter(Boolean).join(' / ');
     }
 
     /**
@@ -566,7 +785,7 @@
             segment.features.forEach((feature, featureIdx) => {
               const color = getPriorityColor(feature.priority);
               const priorityDetails = window.priorities[feature.priority];
-              const polyline = L.polyline(feature.coords, {
+            const polyline = L.polyline(feature.coords, {
                 color,
                 weight: lineWeight,
                 lineCap: 'round',
@@ -675,6 +894,18 @@
         const aboutToggle = document.getElementById('about-toggle');
         const aboutPanel = document.getElementById('about-panel');
         const aboutClose = document.getElementById('about-close');
+        const reportPanel = document.getElementById('report-panel');
+        const reportClose = document.getElementById('report-close');
+        const reportNotes = document.getElementById('report-notes');
+        const reportEmailBody = document.getElementById('report-email-body');
+        const reportEmailLink = document.getElementById('report-email-link');
+        const reportCopyBody = document.getElementById('report-copy-body');
+        const reportStatusMessage = document.getElementById('report-status-message');
+        let reportFeature = null;
+        let reportStreetText = 'Unnamed segment';
+        let reportTravelwayType = 'Travelway';
+        let reportRouteText = 'Not matched';
+        let reportDatasetUrl = 'Not available';
         const datasetConfig = {
           sidewalks: { url: 'features.bin', datasetCode: 0 },
           cycling: { url: 'features_cycling.bin', datasetCode: 1 }
@@ -702,6 +933,7 @@
             console.error("Unknown dataset:", mode);
             return;
           }
+          currentDatasetMode = mode;
           currentDatasetCode = config.datasetCode;
           resetRenderedFeatures();
           const isInitialLoad = !hasLoadedDataset;
@@ -757,6 +989,143 @@
             setAboutOpen(false);
           }
         });
+
+        function setReportOpen(isOpen) {
+          reportPanel.classList.toggle('is-open', isOpen);
+          reportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+          if (isOpen) {
+            reportStatusMessage.textContent = '';
+            reportClose.focus();
+          } else {
+            reportNotes.value = '';
+            reportFeature = null;
+            reportStreetText = 'Unnamed segment';
+            reportTravelwayType = 'Travelway';
+            reportRouteText = 'Not matched';
+            reportDatasetUrl = 'Not available';
+          }
+        }
+
+        reportClose.addEventListener('click', () => setReportOpen(false));
+        reportPanel.addEventListener('click', (event) => {
+          if (event.target === reportPanel) {
+            setReportOpen(false);
+          }
+        });
+        document.addEventListener('click', (event) => {
+          const button = event.target.closest('.popup-311-button');
+          if (!button) {
+            return;
+          }
+          const segmentIdx = Number(button.dataset.seg);
+          const featureIdx = Number(button.dataset.feature);
+          const segment = allSegments[segmentIdx];
+          if (!segment || !segment.features || !segment.features[featureIdx]) {
+            return;
+          }
+          if (reportActions.openFromFeature) {
+            reportActions.openFromFeature(segment.features[featureIdx]);
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        });
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape' && reportPanel.classList.contains('is-open')) {
+            setReportOpen(false);
+          }
+        });
+        function updateReportEmailDraft() {
+          if (!reportFeature) {
+            return;
+          }
+          reportStatusMessage.textContent = '';
+          const street = reportStreetText;
+          const travelwayType = reportTravelwayType;
+          const routeLabel = reportRouteText;
+          const datasetUrl = reportDatasetUrl;
+          const note = reportNotes.value.trim();
+          const lines = [
+            'Hello 311,',
+            '',
+            'I am reporting a snow issue for:',
+            '',
+            `${travelwayType}: ${street}`,
+            '',
+            `Winter route: ${routeLabel}`,
+            '',
+            `Open Data map location: ${datasetUrl}`
+          ];
+          if (note) {
+            lines.push('', `Note: ${note}`);
+          }
+          const body = lines.join('\n');
+          const subject = `Snow clearing - ${street}`;
+          reportEmailBody.textContent = body;
+          reportEmailLink.href = `mailto:contactus@311.halifax.ca?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        }
+
+        function setReportFromFeature(feature) {
+          reportFeature = feature;
+          reportStatusMessage.textContent = '';
+          const street = feature.title || 'Unnamed segment';
+          const travelwayType = travelwayTypeForFeature(feature);
+          const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
+          reportStreetText = street;
+          reportTravelwayType = travelwayType;
+          reportRouteText = routeLabel;
+          const midpoint = featureMidpoint(feature.coords);
+          const datasetUrl = datasetExploreUrl(currentDatasetCode, midpoint);
+          reportDatasetUrl = datasetUrl || 'Not available';
+          reportNotes.value = '';
+          updateReportEmailDraft();
+        }
+
+        reportNotes.addEventListener('input', updateReportEmailDraft);
+        reportCopyBody.addEventListener('click', async () => {
+          reportStatusMessage.textContent = '';
+          const text = reportEmailBody.textContent;
+          if (!text) {
+            reportStatusMessage.textContent = 'Nothing to copy yet.';
+            return;
+          }
+          const fallbackCopy = () => {
+            const temp = document.createElement('textarea');
+            temp.value = text;
+            temp.setAttribute('readonly', '');
+            temp.style.position = 'fixed';
+            temp.style.top = '0';
+            temp.style.left = '0';
+            temp.style.width = '1px';
+            temp.style.height = '1px';
+            temp.style.opacity = '0';
+            temp.style.fontSize = '16px';
+            document.body.appendChild(temp);
+            temp.select();
+            temp.setSelectionRange(0, text.length);
+            const ok = document.execCommand('copy');
+            document.body.removeChild(temp);
+            return ok;
+          };
+          try {
+            if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(text);
+              reportStatusMessage.textContent = 'Copied email body.';
+              return;
+            }
+            if (fallbackCopy()) {
+              reportStatusMessage.textContent = 'Copied email body.';
+            } else {
+              reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
+            }
+          } catch (error) {
+            console.error('Unable to copy email body', error);
+            reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
+          }
+        });
+        reportActions.openFromFeature = (feature) => {
+          setReportFromFeature(feature);
+          setReportOpen(true);
+        };
       })
       .catch(error => console.error("Error loading priorities:", error));
   </script>
