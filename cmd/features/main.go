@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func main() {
 	fs.StringVar(&cfg.TravelwaysFile, "travelways", "", "path to travelways geojson file, otherwise download")
 	fs.StringVar(&cfg.BikeFile, "bike", "", "path to bike infrastructure geojson file, otherwise download")
 	fs.StringVar(&cfg.IceFile, "ice", "", "path to ice routes geojson file, otherwise download")
+	fs.StringVar(&cfg.SaveDownloadsDir, "save-downloads-dir", "", "directory to save downloaded geojson files")
 	fs.StringVar(&cfg.TravelwaysOut, "out-travelways", defaultTravelwaysOut, "path to write travelways features bin")
 	fs.StringVar(&cfg.BikeOut, "out-bike", defaultBikeOut, "path to write bike infrastructure features bin")
 	fs.Float64Var(&cfg.MaxMatchMeters, "max-match-meters", 30, "max distance in meters to match bike routes to travelways or ice routes")
@@ -62,6 +64,7 @@ type runConfig struct {
 	TravelwaysFile     string
 	BikeFile           string
 	IceFile            string
+	SaveDownloadsDir   string
 	TravelwaysOut      string
 	BikeOut            string
 	MaxMatchMeters     float64
@@ -72,15 +75,15 @@ type runConfig struct {
 }
 
 func run(ctx context.Context, cfg runConfig) error {
-	travelwaysFC, err := loadFeatureCollection(ctx, cfg.TravelwaysFile, activeTravelwaysItemID)
+	travelwaysFC, err := loadFeatureCollection(ctx, cfg.TravelwaysFile, cfg.SaveDownloadsDir, "travelways.geojson", activeTravelwaysItemID)
 	if err != nil {
 		return err
 	}
-	bikeFC, err := loadFeatureCollection(ctx, cfg.BikeFile, bikeInfraItemID)
+	bikeFC, err := loadFeatureCollection(ctx, cfg.BikeFile, cfg.SaveDownloadsDir, "bike.geojson", bikeInfraItemID)
 	if err != nil {
 		return err
 	}
-	iceFC, err := loadFeatureCollection(ctx, cfg.IceFile, iceRoutesItemID)
+	iceFC, err := loadFeatureCollection(ctx, cfg.IceFile, cfg.SaveDownloadsDir, "ice.geojson", iceRoutesItemID)
 	if err != nil {
 		return err
 	}
@@ -585,7 +588,10 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			found = match.hasMatch
 			if found {
 				sourceDataset = datasetTravelways
-				reason = "matched travelways"
+				reason = fmt.Sprintf("matched travelways object_id=%d", travelwayID)
+				if travelwayTitle := travelwayTitles[travelwayID]; travelwayTitle != "" {
+					reason = fmt.Sprintf("matched travelways object_id=%d title=%q", travelwayID, travelwayTitle)
+				}
 				matchedTravelways++
 			}
 		} else {
@@ -596,7 +602,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			if found {
 				sourceDataset = datasetIce
 				iceRouteID = match.objectID
-				reason = "matched ice"
+				reason = fmt.Sprintf("matched ice object_id=%d", iceRouteID)
 				matchedIce++
 			}
 		}
@@ -1044,7 +1050,7 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 	return nil
 }
 
-func loadFeatureCollection(ctx context.Context, path, itemID string) (*geojson.FeatureCollection, error) {
+func loadFeatureCollection(ctx context.Context, path, saveDir, saveName, itemID string) (*geojson.FeatureCollection, error) {
 	var data []byte
 	if path == "" {
 		rc, err := download(ctx, itemID)
@@ -1058,6 +1064,14 @@ func loadFeatureCollection(ctx context.Context, path, itemID string) (*geojson.F
 			return nil, err
 		}
 		data = b
+		if saveDir != "" {
+			if err := os.MkdirAll(saveDir, 0755); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(saveDir, saveName), data, 0644); err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		b, err := os.ReadFile(path)
 		if err != nil {
