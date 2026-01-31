@@ -51,6 +51,7 @@ func main() {
 	fs.Float64Var(&cfg.MaxMatchMeters, "max-match-meters", 30, "max distance in meters to match bike routes to travelways or ice routes")
 	fs.Float64Var(&cfg.MaxAngleDeg, "max-angle-deg", 30, "max angle delta in degrees for matching bike routes to other datasets")
 	fs.Float64Var(&cfg.MinRunMeters, "min-run-meters", 20, "min run length in meters when collapsing bike priority segments")
+	fs.Float64Var(&cfg.SimplifyMeters, "simplify-meters", 2, "simplify line geometry (Douglas-Peucker) in meters; 0 disables")
 	fs.StringVar(&cfg.DebugOut, "debug-out", "", "path to write debug json with decision details")
 	fs.Parse(os.Args[1:])
 
@@ -69,6 +70,7 @@ type runConfig struct {
 	MaxMatchMeters   float64
 	MaxAngleDeg      float64
 	MinRunMeters     float64
+	SimplifyMeters   float64
 	DebugOut         string
 }
 
@@ -128,10 +130,10 @@ func run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 
-	if err := writeFeaturesBin(cfg.TravelwaysOut, travelwaysFeatures); err != nil {
+	if err := writeFeaturesBin(cfg.TravelwaysOut, travelwaysFeatures, cfg.SimplifyMeters); err != nil {
 		return err
 	}
-	if err := writeFeaturesBin(cfg.BikeOut, bikeFeatures); err != nil {
+	if err := writeFeaturesBin(cfg.BikeOut, bikeFeatures, cfg.SimplifyMeters); err != nil {
 		return err
 	}
 	if cfg.DebugOut != "" {
@@ -139,6 +141,7 @@ func run(ctx context.Context, cfg runConfig) error {
 			MaxMatchMeters: cfg.MaxMatchMeters,
 			MaxAngleDeg:    cfg.MaxAngleDeg,
 			MinRunMeters:   cfg.MinRunMeters,
+			SimplifyMeters: cfg.SimplifyMeters,
 		}
 		if err := writeDebug(cfg.DebugOut, debugEntries, debugCfg); err != nil {
 			return err
@@ -183,9 +186,19 @@ type debugConfig struct {
 	MaxMatchMeters float64 `json:"max_match_meters"`
 	MaxAngleDeg    float64 `json:"max_angle_deg"`
 	MinRunMeters   float64 `json:"min_run_meters"`
+	SimplifyMeters float64 `json:"simplify_meters"`
 }
 
-func writeFeaturesBin(path string, features []lineFeature) error {
+func writeFeaturesBin(path string, features []lineFeature, simplifyMeters float64) error {
+	if simplifyMeters > 0 {
+		var before, after int
+		for i := range features {
+			before += len(features[i].coords)
+			features[i].coords = simplifyLineString(features[i].coords, simplifyMeters)
+			after += len(features[i].coords)
+		}
+		log.Printf("simplify %s: points %d -> %d (tolerance %.1fm)", path, before, after, simplifyMeters)
+	}
 	var out bytes.Buffer
 	if err := encodeFeatures(features, &out); err != nil {
 		return err
@@ -1845,6 +1858,53 @@ func lineLengthMeters(line orb.LineString, proj projector) float64 {
 		total += distancePoint(xy[i], xy[i+1])
 	}
 	return total
+}
+
+func simplifyLineString(line orb.LineString, toleranceMeters float64) orb.LineString {
+	if toleranceMeters <= 0 || len(line) <= 2 {
+		return line
+	}
+	proj := projectorForLine(line)
+	xy := proj.lineToXY(line)
+	keep := make([]bool, len(line))
+	keep[0] = true
+	keep[len(line)-1] = true
+	stack := [][2]int{{0, len(line) - 1}}
+
+	for len(stack) > 0 {
+		n := len(stack) - 1
+		start, end := stack[n][0], stack[n][1]
+		stack = stack[:n]
+		if end-start <= 1 {
+			continue
+		}
+		maxDist := 0.0
+		maxIdx := -1
+		a := xy[start]
+		b := xy[end]
+		for i := start + 1; i < end; i++ {
+			d := pointSegmentDistance(xy[i], a, b)
+			if d > maxDist {
+				maxDist = d
+				maxIdx = i
+			}
+		}
+		if maxIdx >= 0 && maxDist > toleranceMeters {
+			keep[maxIdx] = true
+			stack = append(stack, [2]int{start, maxIdx}, [2]int{maxIdx, end})
+		}
+	}
+
+	out := make(orb.LineString, 0, len(line))
+	for i, ok := range keep {
+		if ok {
+			out = append(out, line[i])
+		}
+	}
+	if len(out) < 2 {
+		return line
+	}
+	return out
 }
 
 func projectorForLine(line orb.LineString) projector {
