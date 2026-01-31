@@ -651,16 +651,6 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				}
 			}
 
-			// Name fallback: use dominant overlapping travelway LOCATION when bike name is missing.
-			if (title == "" || titleFromType) && nameTravelwaysIndex != nil {
-				nameAttr := overlapAttribution(ls, nameTravelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
-				if id := dominantObjectID(nameAttr.byObjectID); id != 0 {
-					if name := nameTravelwayTitles[id]; name != "" {
-						title = name
-					}
-				}
-			}
-
 			if title == "" {
 				skippedNoName++
 				appendDebug(debug, debugEntry{
@@ -747,6 +737,15 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			}
 
 			for _, run := range runs {
+				runTitle := title
+				if (runTitle == "" || titleFromType) && nameTravelwaysIndex != nil {
+					nameAttr := overlapAttribution(run.coords, nameTravelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+					if id := dominantObjectID(nameAttr.byObjectID); id != 0 {
+						if name := nameTravelwayTitles[id]; name != "" {
+							runTitle = name
+						}
+					}
+				}
 				runWintMaint := wintMaint
 				runWintRoute := wintRoute
 				if runWintMaint == "" && runWintRoute == "" {
@@ -766,7 +765,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 					}
 				}
 				features = append(features, lineFeature{
-					title:         title,
+					title:         runTitle,
 					priority:      run.priority,
 					coords:        run.coords,
 					sourceDataset: run.sourceDataset,
