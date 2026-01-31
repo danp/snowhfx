@@ -596,25 +596,15 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			var (
 				sourceDataset uint8
 				attr          overlapAttributionResult
-				iceAttr       overlapAttributionResult
-				twAttr        overlapAttributionResult
 				found         bool
 				reason        string
 			)
 
 			if isHelpConn {
-				iceAttr = overlapAttribution(ls, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
-				twAttr = overlapAttribution(ls, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
-				if twAttr.totalLength >= iceAttr.totalLength && twAttr.totalLength > 0 {
-					attr = twAttr
-					sourceDataset = datasetTravelways
-					reason = "overlap-first travelways"
-					found = true
-					matchedTravelways++
-				} else if iceAttr.totalLength > 0 {
-					attr = iceAttr
+				attr = overlapAttributionPrefer(ls, iceIndex, datasetIce, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+				if attr.totalLength > 0 {
 					sourceDataset = datasetIce
-					reason = "overlap-first ice"
+					reason = "overlap-first ice with travelways fallback"
 					found = true
 					matchedIce++
 				}
@@ -756,29 +746,32 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				continue
 			}
 
-			dominantID := dominantObjectID(attr.byObjectID)
-			if (wintMaint == "" && wintRoute == "") && dominantID != 0 {
-				if sourceDataset == datasetTravelways {
-					if info, ok := travelwayRoutes[dominantID]; ok {
-						wintMaint = info.maint
-						wintRoute = info.route
-					}
-				} else if sourceDataset == datasetIce {
-					if info, ok := iceRoutes[dominantID]; ok {
-						wintMaint = info.maint
-						wintRoute = info.route
+			for _, run := range runs {
+				runWintMaint := wintMaint
+				runWintRoute := wintRoute
+				if runWintMaint == "" && runWintRoute == "" {
+					dominantID := dominantObjectID(run.byObjectID)
+					if dominantID != 0 {
+						if run.sourceDataset == datasetTravelways {
+							if info, ok := travelwayRoutes[dominantID]; ok {
+								runWintMaint = info.maint
+								runWintRoute = info.route
+							}
+						} else if run.sourceDataset == datasetIce {
+							if info, ok := iceRoutes[dominantID]; ok {
+								runWintMaint = info.maint
+								runWintRoute = info.route
+							}
+						}
 					}
 				}
-			}
-
-			for _, run := range runs {
 				features = append(features, lineFeature{
 					title:         title,
 					priority:      run.priority,
 					coords:        run.coords,
 					sourceDataset: run.sourceDataset,
-					wintMaint:     wintMaint,
-					wintRoute:     wintRoute,
+					wintMaint:     runWintMaint,
+					wintRoute:     runWintRoute,
 				})
 			}
 
@@ -1314,6 +1307,7 @@ type segmentAssignment struct {
 	start         orb.Point
 	end           orb.Point
 	length        float64
+	distanceMeters float64
 	objectID      int
 	sourceDataset uint8
 	segmentIndex  int
@@ -1331,6 +1325,7 @@ type lineRun struct {
 	sourceDataset uint8
 	coords        orb.LineString
 	length        float64
+	byObjectID    map[int]float64
 }
 
 type cellKey struct {
@@ -1581,6 +1576,7 @@ func overlapAttribution(line orb.LineString, idx *spatialIndex, sourceDataset ui
 			start:         line[i],
 			end:           line[i+1],
 			length:        segLength,
+			distanceMeters: bestDist,
 			objectID:      bestObjectID,
 			sourceDataset: sourceDataset,
 			segmentIndex:  i,
@@ -1629,21 +1625,33 @@ func overlapAttributionPrefer(line orb.LineString, primaryIdx *spatialIndex, pri
 		fallbackMap[seg.segmentIndex] = seg
 	}
 	for i := 0; i < len(line)-1; i++ {
-		if seg, ok := primaryMap[i]; ok {
+		primarySeg, primaryOK := primaryMap[i]
+		fallbackSeg, fallbackOK := fallbackMap[i]
+		switch {
+		case primaryOK && fallbackOK:
+			seg := primarySeg
+			if fallbackSeg.distanceMeters < primarySeg.distanceMeters {
+				seg = fallbackSeg
+			}
 			assignments = append(assignments, seg)
 			result.totalLength += seg.length
 			result.byPriority[seg.priority] += seg.length
 			if seg.objectID != 0 {
 				result.byObjectID[seg.objectID] += seg.length
 			}
-			continue
-		}
-		if seg, ok := fallbackMap[i]; ok {
-			assignments = append(assignments, seg)
-			result.totalLength += seg.length
-			result.byPriority[seg.priority] += seg.length
-			if seg.objectID != 0 {
-				result.byObjectID[seg.objectID] += seg.length
+		case primaryOK:
+			assignments = append(assignments, primarySeg)
+			result.totalLength += primarySeg.length
+			result.byPriority[primarySeg.priority] += primarySeg.length
+			if primarySeg.objectID != 0 {
+				result.byObjectID[primarySeg.objectID] += primarySeg.length
+			}
+		case fallbackOK:
+			assignments = append(assignments, fallbackSeg)
+			result.totalLength += fallbackSeg.length
+			result.byPriority[fallbackSeg.priority] += fallbackSeg.length
+			if fallbackSeg.objectID != 0 {
+				result.byObjectID[fallbackSeg.objectID] += fallbackSeg.length
 			}
 		}
 	}
@@ -1675,11 +1683,18 @@ func runsFromAssignments(assignments []segmentAssignment, minRunMeters float64) 
 				sourceDataset: seg.sourceDataset,
 				coords:        orb.LineString{seg.start, seg.end},
 				length:        seg.length,
+				byObjectID:    make(map[int]float64),
+			}
+			if seg.objectID != 0 {
+				current.byObjectID[seg.objectID] = seg.length
 			}
 			continue
 		}
 		current.coords = concatLineStrings(current.coords, orb.LineString{seg.start, seg.end})
 		current.length += seg.length
+		if seg.objectID != 0 {
+			current.byObjectID[seg.objectID] += seg.length
+		}
 	}
 	if current != nil {
 		runs = append(runs, *current)

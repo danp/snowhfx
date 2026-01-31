@@ -760,16 +760,26 @@ func TestBikeOverlapRuns(t *testing.T) {
 		Type: "FeatureCollection",
 		Features: []geojsonFeature{
 			{
-				Type:       "Feature",
-				Properties: map[string]interface{}{"PRIORITY": "1"},
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":   11,
+					"PRIORITY":   "1",
+					"OPERATOR":   "W1",
+					"ROUTE_NAME": "R1",
+				},
 				Geometry: geojsonGeometry{
 					Type:        "LineString",
 					Coordinates: [][]float64{{0, 0}, {0.0005, 0}},
 				},
 			},
 			{
-				Type:       "Feature",
-				Properties: map[string]interface{}{"PRIORITY": "2"},
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":   22,
+					"PRIORITY":   "2",
+					"OPERATOR":   "W2",
+					"ROUTE_NAME": "R2",
+				},
 				Geometry: geojsonGeometry{
 					Type:        "LineString",
 					Coordinates: [][]float64{{0.0013, 0}, {0.0018, 0}},
@@ -804,7 +814,16 @@ func TestBikeOverlapRuns(t *testing.T) {
 	}
 
 	features := readFeaturesBin(t, bikeOut)
+	routesByID := map[uint16]featuresbin.RouteEntry{}
+	_, routes, _, err := featuresbin.ReadFile(bikeOut)
+	if err != nil {
+		t.Fatalf("read features (routes): %v", err)
+	}
+	for i, route := range routes {
+		routesByID[uint16(i+1)] = route
+	}
 	var p1, p2 int
+	var p1Route, p2Route string
 	for _, feat := range features {
 		if feat.title != "Overlap Run" {
 			continue
@@ -812,12 +831,21 @@ func TestBikeOverlapRuns(t *testing.T) {
 		switch feat.priority {
 		case 1:
 			p1++
+			if route, ok := routesByID[feat.routeID]; ok {
+				p1Route = route.Route
+			}
 		case 2:
 			p2++
+			if route, ok := routesByID[feat.routeID]; ok {
+				p2Route = route.Route
+			}
 		}
 	}
 	if p1 == 0 || p2 == 0 {
 		t.Fatalf("expected overlap runs with priorities 1 and 2, got p1=%d p2=%d", p1, p2)
+	}
+	if p1Route == "" || p2Route == "" || p1Route == p2Route {
+		t.Fatalf("expected distinct routes per run, got p1=%q p2=%q", p1Route, p2Route)
 	}
 }
 
