@@ -4,3 +4,4 @@ features*.bin
 *.geojson
 debug*.json
 tmp
+*.pdf
