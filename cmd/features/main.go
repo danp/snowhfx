@@ -50,8 +50,7 @@ func main() {
 	fs.StringVar(&cfg.BikeOut, "out-bike", defaultBikeOut, "path to write bike infrastructure features bin")
 	fs.Float64Var(&cfg.MaxMatchMeters, "max-match-meters", 30, "max distance in meters to match bike routes to travelways or ice routes")
 	fs.Float64Var(&cfg.MaxAngleDeg, "max-angle-deg", 30, "max angle delta in degrees for matching bike routes to other datasets")
-	fs.Float64Var(&cfg.MaxOverallAngleDeg, "max-overall-angle-deg", 60, "max angle delta in degrees between overall line directions")
-	fs.Float64Var(&cfg.PriorityBiasMeters, "priority-bias-meters", 1, "distance window to prefer higher priority matches over the nearest line")
+	fs.Float64Var(&cfg.MinRunMeters, "min-run-meters", 20, "min run length in meters when collapsing bike priority segments")
 	fs.StringVar(&cfg.DebugOut, "debug-out", "", "path to write debug json with decision details")
 	fs.Parse(os.Args[1:])
 
@@ -61,17 +60,16 @@ func main() {
 }
 
 type runConfig struct {
-	TravelwaysFile     string
-	BikeFile           string
-	IceFile            string
-	SaveDownloadsDir   string
-	TravelwaysOut      string
-	BikeOut            string
-	MaxMatchMeters     float64
-	MaxAngleDeg        float64
-	MaxOverallAngleDeg float64
-	PriorityBiasMeters float64
-	DebugOut           string
+	TravelwaysFile   string
+	BikeFile         string
+	IceFile          string
+	SaveDownloadsDir string
+	TravelwaysOut    string
+	BikeOut          string
+	MaxMatchMeters   float64
+	MaxAngleDeg      float64
+	MinRunMeters     float64
+	DebugOut         string
 }
 
 func run(ctx context.Context, cfg runConfig) error {
@@ -88,15 +86,6 @@ func run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 
-	noPlowTravelways := travelwayNoPlowLines(travelwaysFC)
-	var noPlowIndex *spatialIndex
-	if len(noPlowTravelways) > 0 {
-		noPlowIndex, err = newSpatialIndex(noPlowTravelways, 48, 24)
-		if err != nil {
-			return err
-		}
-	}
-
 	var debugEntries []debugEntry
 	titleNormalizer := newTitleNormalizer()
 	seedTitleNormalizerFromTravelways(travelwaysFC, titleNormalizer)
@@ -106,12 +95,15 @@ func run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 
-	travelwaysIndex, err := newSpatialIndex(linesForIndex(travelwaysFeatures), 48, 24)
+	priorityTravelways, priorityTravelwayRoutes, err := travelwayPriorityLines(travelwaysFC)
+	if err != nil {
+		return err
+	}
+	travelwaysIndex, err := newSpatialIndex(priorityTravelways, 48, 24)
 	if err != nil {
 		return err
 	}
 	travelwayTitles := travelwayTitleMap(travelwaysFeatures)
-	travelwayRoutes := travelwayRouteMap(travelwaysFeatures)
 	iceLines, err := iceRouteLines(iceFC)
 	if err != nil {
 		return err
@@ -122,7 +114,16 @@ func run(ctx context.Context, cfg runConfig) error {
 		return err
 	}
 
-	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, travelwayTitles, travelwayRoutes, iceRoutes, noPlowIndex, iceIndex, cfg.MaxMatchMeters, cfg.MaxAngleDeg, cfg.MaxOverallAngleDeg, cfg.PriorityBiasMeters, &debugEntries)
+	nameTravelways, nameTravelwayTitles, err := travelwayNameLines(travelwaysFC, titleNormalizer)
+	if err != nil {
+		return err
+	}
+	nameTravelwaysIndex, err := newSpatialIndex(nameTravelways, 48, 24)
+	if err != nil {
+		return err
+	}
+
+	bikeFeatures, err := bikeLines(bikeFC, titleNormalizer, travelwaysIndex, nameTravelwaysIndex, travelwayTitles, nameTravelwayTitles, priorityTravelwayRoutes, iceRoutes, iceIndex, cfg.MaxMatchMeters, cfg.MaxAngleDeg, cfg.MinRunMeters, &debugEntries)
 	if err != nil {
 		return err
 	}
@@ -135,10 +136,9 @@ func run(ctx context.Context, cfg runConfig) error {
 	}
 	if cfg.DebugOut != "" {
 		debugCfg := debugConfig{
-			MaxMatchMeters:     cfg.MaxMatchMeters,
-			MaxAngleDeg:        cfg.MaxAngleDeg,
-			MaxOverallAngleDeg: cfg.MaxOverallAngleDeg,
-			PriorityBiasMeters: cfg.PriorityBiasMeters,
+			MaxMatchMeters: cfg.MaxMatchMeters,
+			MaxAngleDeg:    cfg.MaxAngleDeg,
+			MinRunMeters:   cfg.MinRunMeters,
 		}
 		if err := writeDebug(cfg.DebugOut, debugEntries, debugCfg); err != nil {
 			return err
@@ -180,10 +180,9 @@ type debugEntry struct {
 }
 
 type debugConfig struct {
-	MaxMatchMeters     float64 `json:"max_match_meters"`
-	MaxAngleDeg        float64 `json:"max_angle_deg"`
-	MaxOverallAngleDeg float64 `json:"max_overall_angle_deg"`
-	PriorityBiasMeters float64 `json:"priority_bias_meters"`
+	MaxMatchMeters float64 `json:"max_match_meters"`
+	MaxAngleDeg    float64 `json:"max_angle_deg"`
+	MinRunMeters   float64 `json:"min_run_meters"`
 }
 
 func writeFeaturesBin(path string, features []lineFeature) error {
@@ -240,6 +239,7 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 	for _, f := range fc.Features {
 		props := f.Properties
 		objectID := props.MustInt("OBJECTID", 0)
+		location := strings.TrimSpace(props.MustString("LOCATION", ""))
 		wintPlow := strings.TrimSpace(props.MustString("WINT_PLOW", ""))
 		wintLOS := strings.TrimSpace(props.MustString("WINT_LOS", ""))
 		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
@@ -276,7 +276,7 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 			appendDebug(debug, debugEntry{
 				Dataset:  "travelways",
 				ObjectID: objectID,
-				Title:    props.MustString("LOCATION", ""),
+				Title:    location,
 				Included: false,
 				Reason:   "missing or invalid WINT_LOS",
 				WintPlow: wintPlow,
@@ -311,7 +311,19 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 			continue
 		}
 
-		title := titles.normalize(props.MustString("LOCATION", ""))
+		if location == "" {
+			appendDebug(debug, debugEntry{
+				Dataset:  "travelways",
+				ObjectID: objectID,
+				Title:    "",
+				Included: false,
+				Reason:   "missing LOCATION",
+				WintPlow: wintPlow,
+				WintLOS:  wintLOS,
+			})
+			continue
+		}
+		title := titles.normalize(location)
 		if strings.EqualFold(title, "CORNWALLIS ST") {
 			title = titles.normalize("Nora Bernard St")
 		}
@@ -343,6 +355,41 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 	return features, nil
 }
 
+func travelwayNameLines(fc *geojson.FeatureCollection, titles *titleNormalizer) ([]indexedLine, map[int]string, error) {
+	lines := make([]indexedLine, 0, len(fc.Features))
+	titleMap := make(map[int]string)
+	for _, f := range fc.Features {
+		props := f.Properties
+		objectID := props.MustInt("OBJECTID", 0)
+		owner := strings.TrimSpace(props.MustString("OWNER", ""))
+		if isPrivateOwner(owner) {
+			continue
+		}
+		location := strings.TrimSpace(props.MustString("LOCATION", ""))
+		if location == "" {
+			continue
+		}
+		ls, ok, err := flattenLineString(f.Geometry)
+		if err != nil || !ok {
+			continue
+		}
+		title := titles.normalize(location)
+		if strings.EqualFold(title, "CORNWALLIS ST") {
+			title = titles.normalize("Nora Bernard St")
+		}
+		titleMap[objectID] = title
+		lines = append(lines, indexedLine{
+			coords:   ls,
+			priority: 1,
+			objectID: objectID,
+		})
+	}
+	if len(lines) == 0 {
+		return nil, nil, fmt.Errorf("no travelway name lines")
+	}
+	return lines, titleMap, nil
+}
+
 func travelwayTitleMap(features []lineFeature) map[int]string {
 	titles := make(map[int]string, len(features))
 	for _, feature := range features {
@@ -359,46 +406,43 @@ type routeInfo struct {
 	route string
 }
 
-func travelwayRouteMap(features []lineFeature) map[int]routeInfo {
-	routes := make(map[int]routeInfo, len(features))
-	for _, feature := range features {
-		if feature.objectID == 0 {
-			continue
-		}
-		if feature.wintMaint == "" && feature.wintRoute == "" {
-			continue
-		}
-		routes[feature.objectID] = routeInfo{
-			maint: feature.wintMaint,
-			route: feature.wintRoute,
-		}
-	}
-	return routes
-}
-
-func travelwayNoPlowLines(fc *geojson.FeatureCollection) []indexedLine {
-	lines := make([]indexedLine, 0)
+func travelwayPriorityLines(fc *geojson.FeatureCollection) ([]indexedLine, map[int]routeInfo, error) {
+	lines := make([]indexedLine, 0, len(fc.Features))
+	routes := make(map[int]routeInfo)
 	for _, f := range fc.Features {
 		props := f.Properties
+		objectID := props.MustInt("OBJECTID", 0)
 		owner := strings.TrimSpace(props.MustString("OWNER", ""))
 		if isPrivateOwner(owner) {
 			continue
 		}
-		if !isNotPlowed(props) {
+		if isNotPlowed(props) {
+			continue
+		}
+		wintLOS := strings.TrimSpace(props.MustString("WINT_LOS", ""))
+		priority, ok := priorityFromWintLOS(wintLOS)
+		if !ok {
 			continue
 		}
 		ls, ok, err := flattenLineString(f.Geometry)
 		if err != nil || !ok {
 			continue
 		}
-		objectID := props.MustInt("OBJECTID", 0)
 		lines = append(lines, indexedLine{
 			coords:   ls,
-			priority: 1,
+			priority: priority,
 			objectID: objectID,
 		})
+		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
+		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
+		if wintMaint != "" || wintRoute != "" {
+			routes[objectID] = routeInfo{maint: wintMaint, route: wintRoute}
+		}
 	}
-	return lines
+	if len(lines) == 0 {
+		return nil, nil, fmt.Errorf("no travelway priority lines")
+	}
+	return lines, routes, nil
 }
 
 func seedTitleNormalizerFromTravelways(fc *geojson.FeatureCollection, titles *titleNormalizer) {
@@ -479,17 +523,16 @@ func bikeTitle(props geojson.Properties, titles *titleNormalizer) (string, bool)
 	return title, true
 }
 
-func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelwaysIndex *spatialIndex, travelwayTitles map[int]string, travelwayRoutes map[int]routeInfo, iceRoutes map[int]routeInfo, noPlowIndex, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, maxOverallAngleDeg, priorityBiasMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
+func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelwaysIndex, nameTravelwaysIndex *spatialIndex, travelwayTitles, nameTravelwayTitles map[int]string, travelwayRoutes map[int]routeInfo, iceRoutes map[int]routeInfo, iceIndex *spatialIndex, maxMatchMeters, maxAngleDeg, minRunMeters float64, debug *[]debugEntry) ([]lineFeature, error) {
 	var (
 		matchedTravelways int
 		matchedIce        int
 		matchedFallback   int
 		skipped           int
 		skippedNotPlowed  int
-		skippedNoPlowTW   int
+		skippedNoName     int
 	)
 	maxAngleRad := deg2rad(maxAngleDeg)
-	maxOverallAngleRad := deg2rad(maxOverallAngleDeg)
 
 	features := make([]lineFeature, 0, len(fc.Features))
 	for _, f := range fc.Features {
@@ -497,6 +540,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		objectID := props.MustInt("OBJECTID", 0)
 		wintPlow := strings.TrimSpace(props.MustString("WINT_PLOW", ""))
 		wintLOS := strings.TrimSpace(props.MustString("WINT_LOS", ""))
+		bikeType := strings.TrimSpace(props.MustString("BIKETYPE", ""))
 		if isNotPlowed(props) {
 			skippedNotPlowed++
 			appendDebug(debug, debugEntry{
@@ -507,7 +551,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				Reason:     "WINT_PLOW=N",
 				WintPlow:   wintPlow,
 				WintLOS:    wintLOS,
-				BikeType:   props.MustString("BIKETYPE", ""),
+				BikeType:   bikeType,
 				ProtType:   props.MustString("PROT_TYPE", ""),
 				BikeName:   props.MustString("BIKE_NAME", ""),
 				StreetName: props.MustString("STREETNAME", ""),
@@ -515,11 +559,11 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			continue
 		}
 
-		ls, ok, err := flattenLineString(f.Geometry)
+		lines, err := lineStringsFromGeometry(f.Geometry)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if len(lines) == 0 {
 			appendDebug(debug, debugEntry{
 				Dataset:    "bike",
 				ObjectID:   objectID,
@@ -528,7 +572,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				Reason:     "empty geometry",
 				WintPlow:   wintPlow,
 				WintLOS:    wintLOS,
-				BikeType:   props.MustString("BIKETYPE", ""),
+				BikeType:   bikeType,
 				ProtType:   props.MustString("PROT_TYPE", ""),
 				BikeName:   props.MustString("BIKE_NAME", ""),
 				StreetName: props.MustString("STREETNAME", ""),
@@ -536,162 +580,234 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			continue
 		}
 
-		title, titleFromType := bikeTitle(props, titles)
+		baseTitle, baseTitleFromType := bikeTitle(props, titles)
 		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
 		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
-		var (
-			priority      uint8
-			matchDistance float64
-			sourceDataset uint8
-			travelwayID   int
-			iceRouteID    int
-			found         bool
-			reason        string
-		)
-		if isProtectedBike(props) {
-			var noPlowObjectID int
-			var noPlowDistance float64
-			var travelwayNearest nearestMatchResult
-			if noPlowIndex != nil {
-				match := noPlowIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
-				noPlowObjectID = match.objectID
-				noPlowDistance = match.distance
+
+		isHelpConn := strings.EqualFold(bikeType, "HELPCONN")
+		isProtected := isProtectedBike(props)
+		isOffstreetFallback := strings.EqualFold(bikeType, "MUPATH") ||
+			strings.EqualFold(bikeType, "INT_MUPATH") ||
+			strings.EqualFold(strings.TrimSpace(props.MustString("PROT_TYPE", "")), "OFFSTREET")
+
+		for _, ls := range lines {
+			title := baseTitle
+			titleFromType := baseTitleFromType
+			var (
+				sourceDataset uint8
+				attr          overlapAttributionResult
+				iceAttr       overlapAttributionResult
+				twAttr        overlapAttributionResult
+				found         bool
+				reason        string
+			)
+
+			if isHelpConn {
+				iceAttr = overlapAttribution(ls, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+				twAttr = overlapAttribution(ls, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+				if twAttr.totalLength >= iceAttr.totalLength && twAttr.totalLength > 0 {
+					attr = twAttr
+					sourceDataset = datasetTravelways
+					reason = "overlap-first travelways"
+					found = true
+					matchedTravelways++
+				} else if iceAttr.totalLength > 0 {
+					attr = iceAttr
+					sourceDataset = datasetIce
+					reason = "overlap-first ice"
+					found = true
+					matchedIce++
+				}
+			} else if isProtected {
+				if isOffstreetFallback {
+					attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+					if attr.totalLength > 0 {
+						sourceDataset = datasetTravelways
+						reason = "overlap-first travelways with ice fallback"
+						found = true
+						matchedTravelways++
+					}
+				} else {
+					attr = overlapAttribution(ls, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+					if attr.totalLength > 0 {
+						sourceDataset = datasetTravelways
+						reason = "overlap-first travelways"
+						found = true
+						matchedTravelways++
+					}
+				}
+			} else {
+				if isOffstreetFallback {
+					attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+					if attr.totalLength > 0 {
+						sourceDataset = datasetTravelways
+						reason = "overlap-first travelways with ice fallback"
+						found = true
+					}
+				} else {
+					attr = overlapAttribution(ls, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+					if attr.totalLength > 0 {
+						sourceDataset = datasetIce
+						reason = "overlap-first ice"
+						found = true
+					}
+				}
+				if attr.totalLength > 0 {
+					if sourceDataset == datasetTravelways {
+						matchedTravelways++
+					} else if sourceDataset == datasetIce {
+						matchedIce++
+					}
+				}
 			}
-			if travelwaysIndex != nil {
-				travelwayNearest = travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
+
+			// Name fallback: use dominant overlapping travelway LOCATION when bike name is missing.
+			if (title == "" || titleFromType) && nameTravelwaysIndex != nil {
+				nameAttr := overlapAttribution(ls, nameTravelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+				if id := dominantObjectID(nameAttr.byObjectID); id != 0 {
+					if name := nameTravelwayTitles[id]; name != "" {
+						title = name
+					}
+				}
 			}
-			if noPlowObjectID != 0 && (!travelwayNearest.hasMatch || noPlowDistance <= travelwayNearest.distance) {
-				skippedNoPlowTW++
+
+			if title == "" {
+				skippedNoName++
 				appendDebug(debug, debugEntry{
-					Dataset:        "bike",
-					ObjectID:       objectID,
-					Title:          title,
-					Included:       false,
-					Reason:         "matched no-plow travelway",
-					WintPlow:       wintPlow,
-					WintLOS:        wintLOS,
-					BikeType:       props.MustString("BIKETYPE", ""),
-					ProtType:       props.MustString("PROT_TYPE", ""),
-					BikeName:       props.MustString("BIKE_NAME", ""),
-					StreetName:     props.MustString("STREETNAME", ""),
-					ProtectedBike:  true,
-					Coords:         ls,
-					NoPlowObjectID: noPlowObjectID,
-					NoPlowDistance: noPlowDistance,
+					Dataset:    "bike",
+					ObjectID:   objectID,
+					Title:      "",
+					Included:   false,
+					Reason:     "missing name",
+					WintPlow:   wintPlow,
+					WintLOS:    wintLOS,
+					BikeType:   bikeType,
+					ProtType:   props.MustString("PROT_TYPE", ""),
+					BikeName:   props.MustString("BIKE_NAME", ""),
+					StreetName: props.MustString("STREETNAME", ""),
+					Coords:     ls,
 				})
 				continue
 			}
-			match := travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
-			priority = match.priority
-			travelwayID = match.objectID
-			matchDistance = match.distance
-			found = match.hasMatch
-			if found {
-				sourceDataset = datasetTravelways
-				reason = fmt.Sprintf("matched travelways object_id=%d", travelwayID)
-				if travelwayTitle := travelwayTitles[travelwayID]; travelwayTitle != "" {
-					reason = fmt.Sprintf("matched travelways object_id=%d title=%q", travelwayID, travelwayTitle)
-				}
-				matchedTravelways++
-			}
-		} else {
-			match := iceIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters)
-			priority = match.priority
-			matchDistance = match.distance
-			found = match.hasMatch
-			if found {
-				sourceDataset = datasetIce
-				iceRouteID = match.objectID
-				reason = fmt.Sprintf("matched ice object_id=%d", iceRouteID)
-				matchedIce++
-			}
-		}
-		if !found {
-			if fallback, ok := priorityFromWintLOS(props.MustString("WINT_LOS", "")); ok {
-				priority = fallback
-				sourceDataset = datasetBike
-				reason = "fallback WINT_LOS"
-				matchedFallback++
-				found = true
-			}
-		}
-		if titleFromType && travelwaysIndex != nil {
-			if travelwayID == 0 {
-				match := travelwaysIndex.nearestMatch(ls, maxMatchMeters, maxAngleRad, maxOverallAngleRad, 0)
-				travelwayID = match.objectID
-			}
-			if travelwayID != 0 {
-				if travelwayTitle := travelwayTitles[travelwayID]; travelwayTitle != "" {
-					title = travelwayTitle
+
+			if !found {
+				if fallback, ok := priorityFromWintLOS(props.MustString("WINT_LOS", "")); ok {
+					length := lineLengthMeters(ls, projectorForLine(ls))
+					attr = overlapAttributionResult{
+						byPriority: map[uint8]float64{fallback: length},
+					}
+					sourceDataset = datasetBike
+					reason = "fallback WINT_LOS"
+					found = true
+					matchedFallback++
 				}
 			}
-		}
-		if (wintMaint == "" && wintRoute == "") && travelwayID != 0 {
-			if info, ok := travelwayRoutes[travelwayID]; ok {
-				wintMaint = info.maint
-				wintRoute = info.route
+
+			if !found {
+				skipped++
+				appendDebug(debug, debugEntry{
+					Dataset:       "bike",
+					ObjectID:      objectID,
+					Title:         title,
+					Included:      false,
+					Reason:        "no match",
+					WintPlow:      wintPlow,
+					WintLOS:       wintLOS,
+					BikeType:      bikeType,
+					ProtType:      props.MustString("PROT_TYPE", ""),
+					BikeName:      props.MustString("BIKE_NAME", ""),
+					StreetName:    props.MustString("STREETNAME", ""),
+					ProtectedBike: isProtected,
+					Coords:        ls,
+				})
+				continue
 			}
-		}
-		if (wintMaint == "" && wintRoute == "") && iceRouteID != 0 {
-			if info, ok := iceRoutes[iceRouteID]; ok {
-				wintMaint = info.maint
-				wintRoute = info.route
+
+			var runs []lineRun
+			if sourceDataset == datasetBike && reason == "fallback WINT_LOS" {
+				runs = []lineRun{
+					{
+						priority:      dominantPriority(attr.byPriority),
+						sourceDataset: sourceDataset,
+						coords:        ls,
+						length:        lineLengthMeters(ls, projectorForLine(ls)),
+					},
+				}
+			} else {
+				runs = runsFromAssignments(attr.assignments, minRunMeters)
 			}
-		}
-		if !found {
-			skipped++
+			if len(runs) == 0 {
+				skipped++
+				appendDebug(debug, debugEntry{
+					Dataset:       "bike",
+					ObjectID:      objectID,
+					Title:         title,
+					Included:      false,
+					Reason:        "no overlap runs",
+					WintPlow:      wintPlow,
+					WintLOS:       wintLOS,
+					BikeType:      bikeType,
+					ProtType:      props.MustString("PROT_TYPE", ""),
+					BikeName:      props.MustString("BIKE_NAME", ""),
+					StreetName:    props.MustString("STREETNAME", ""),
+					ProtectedBike: isProtected,
+					Coords:        ls,
+				})
+				continue
+			}
+
+			dominantID := dominantObjectID(attr.byObjectID)
+			if (wintMaint == "" && wintRoute == "") && dominantID != 0 {
+				if sourceDataset == datasetTravelways {
+					if info, ok := travelwayRoutes[dominantID]; ok {
+						wintMaint = info.maint
+						wintRoute = info.route
+					}
+				} else if sourceDataset == datasetIce {
+					if info, ok := iceRoutes[dominantID]; ok {
+						wintMaint = info.maint
+						wintRoute = info.route
+					}
+				}
+			}
+
+			for _, run := range runs {
+				features = append(features, lineFeature{
+					title:         title,
+					priority:      run.priority,
+					coords:        run.coords,
+					sourceDataset: run.sourceDataset,
+					wintMaint:     wintMaint,
+					wintRoute:     wintRoute,
+				})
+			}
+
 			appendDebug(debug, debugEntry{
 				Dataset:       "bike",
 				ObjectID:      objectID,
 				Title:         title,
-				Included:      false,
-				Reason:        "no match",
+				Included:      true,
+				Reason:        reason,
+				Priority:      dominantPriority(attr.byPriority),
 				WintPlow:      wintPlow,
 				WintLOS:       wintLOS,
-				BikeType:      props.MustString("BIKETYPE", ""),
+				BikeType:      bikeType,
 				ProtType:      props.MustString("PROT_TYPE", ""),
 				BikeName:      props.MustString("BIKE_NAME", ""),
 				StreetName:    props.MustString("STREETNAME", ""),
-				ProtectedBike: isProtectedBike(props),
+				ProtectedBike: isProtected,
+				SourceDataset: datasetName(sourceDataset),
 				Coords:        ls,
 			})
-			continue
 		}
-
-		features = append(features, lineFeature{
-			title:         title,
-			priority:      priority,
-			coords:        ls,
-			sourceDataset: sourceDataset,
-			wintMaint:     wintMaint,
-			wintRoute:     wintRoute,
-		})
-		appendDebug(debug, debugEntry{
-			Dataset:       "bike",
-			ObjectID:      objectID,
-			Title:         title,
-			Included:      true,
-			Reason:        reason,
-			Priority:      priority,
-			WintPlow:      wintPlow,
-			WintLOS:       wintLOS,
-			BikeType:      props.MustString("BIKETYPE", ""),
-			ProtType:      props.MustString("PROT_TYPE", ""),
-			BikeName:      props.MustString("BIKE_NAME", ""),
-			StreetName:    props.MustString("STREETNAME", ""),
-			ProtectedBike: isProtectedBike(props),
-			SourceDataset: datasetName(sourceDataset),
-			MatchDistance: matchDistance,
-			Coords:        ls,
-		})
 	}
 
 	log.Printf("bike lines matched travelways=%d ice=%d fallback=%d skipped=%d", matchedTravelways, matchedIce, matchedFallback, skipped)
 	if skippedNotPlowed > 0 {
 		log.Printf("bike lines skipped not plowed=%d", skippedNotPlowed)
 	}
-	if skippedNoPlowTW > 0 {
-		log.Printf("bike lines skipped due to no-plow travelways=%d", skippedNoPlowTW)
+	if skippedNoName > 0 {
+		log.Printf("bike lines skipped missing name=%d", skippedNoName)
 	}
 
 	return features, nil
@@ -711,7 +827,7 @@ func isProtectedBike(props geojson.Properties) bool {
 		return true
 	}
 	switch strings.TrimSpace(props.MustString("BIKETYPE", "")) {
-	case "PROTBL", "INT_PROTBL", "MUPATH":
+	case "PROTBL", "INT_PROTBL":
 		return true
 	default:
 		return false
@@ -785,18 +901,6 @@ func iceRouteMap(fc *geojson.FeatureCollection) map[int]routeInfo {
 	return routes
 }
 
-func linesForIndex(features []lineFeature) []indexedLine {
-	lines := make([]indexedLine, 0, len(features))
-	for _, f := range features {
-		lines = append(lines, indexedLine{
-			coords:   f.coords,
-			priority: f.priority,
-			objectID: f.objectID,
-		})
-	}
-	return lines
-}
-
 func flattenLineString(geom orb.Geometry) (orb.LineString, bool, error) {
 	var ls orb.LineString
 	switch g := geom.(type) {
@@ -813,6 +917,27 @@ func flattenLineString(geom orb.Geometry) (orb.LineString, bool, error) {
 		return nil, false, nil
 	}
 	return ls, true, nil
+}
+
+func lineStringsFromGeometry(geom orb.Geometry) ([]orb.LineString, error) {
+	switch g := geom.(type) {
+	case orb.LineString:
+		if len(g) == 0 {
+			return nil, nil
+		}
+		return []orb.LineString{g}, nil
+	case orb.MultiLineString:
+		out := make([]orb.LineString, 0, len(g))
+		for _, sub := range g {
+			if len(sub) == 0 {
+				continue
+			}
+			out = append(out, sub)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unknown geometry type: %T", g)
+	}
 }
 
 func encodeFeatures(features []lineFeature, writer io.Writer) error {
@@ -1162,16 +1287,14 @@ type pointXY struct {
 }
 
 type indexedLine struct {
-	coords          orb.LineString
-	xy              []pointXY
-	minLon          float64
-	minLat          float64
-	maxLon          float64
-	maxLat          float64
-	priority        uint8
-	objectID        int
-	overallAngleRad float64
-	hasOverallAngle bool
+	coords   orb.LineString
+	xy       []pointXY
+	minLon   float64
+	minLat   float64
+	maxLon   float64
+	maxLat   float64
+	priority uint8
+	objectID int
 }
 
 type spatialIndex struct {
@@ -1186,11 +1309,28 @@ type spatialIndex struct {
 	projector projector
 }
 
-type nearestMatchResult struct {
-	priority uint8
-	objectID int
-	distance float64
-	hasMatch bool
+type segmentAssignment struct {
+	priority      uint8
+	start         orb.Point
+	end           orb.Point
+	length        float64
+	objectID      int
+	sourceDataset uint8
+	segmentIndex  int
+}
+
+type overlapAttributionResult struct {
+	totalLength float64
+	byPriority  map[uint8]float64
+	byObjectID  map[int]float64
+	assignments []segmentAssignment
+}
+
+type lineRun struct {
+	priority      uint8
+	sourceDataset uint8
+	coords        orb.LineString
+	length        float64
 }
 
 type cellKey struct {
@@ -1251,7 +1391,6 @@ func newSpatialIndex(lines []indexedLine, cols, rows int) (*spatialIndex, error)
 	proj := projector{lat0Rad: deg2rad(lat0)}
 	for i := range lines {
 		lines[i].xy = proj.lineToXY(lines[i].coords)
-		lines[i].overallAngleRad, lines[i].hasOverallAngle = overallLineAngle(lines[i].xy)
 	}
 
 	idx := &spatialIndex{
@@ -1299,78 +1438,6 @@ func newSpatialIndex(lines []indexedLine, cols, rows int) (*spatialIndex, error)
 	return idx, nil
 }
 
-func (idx *spatialIndex) nearestMatch(line orb.LineString, maxDistanceMeters, maxAngleRad, maxOverallAngleRad, priorityBiasMeters float64) nearestMatchResult {
-	if len(line) == 0 {
-		return nearestMatchResult{}
-	}
-
-	minLon, minLat, maxLon, maxLat := lineBounds(line)
-	minLon -= metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
-	maxLon += metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
-	minLat -= metersToDegreesLat(maxDistanceMeters)
-	maxLat += metersToDegreesLat(maxDistanceMeters)
-
-	candidateIdxs := idx.candidates(minLon, minLat, maxLon, maxLat)
-	if len(candidateIdxs) == 0 {
-		return nearestMatchResult{}
-	}
-
-	lineXY := idx.projector.lineToXY(line)
-	lineOverallAngle, hasLineOverall := overallLineAngle(lineXY)
-	minDistance := math.Inf(1)
-	for _, i := range candidateIdxs {
-		candidate := idx.lines[i]
-		if maxOverallAngleRad > 0 && hasLineOverall && candidate.hasOverallAngle {
-			if angleDelta(lineOverallAngle, candidate.overallAngleRad) > maxOverallAngleRad {
-				continue
-			}
-		}
-		distance := minLineDistanceWithAngle(lineXY, candidate.xy, maxAngleRad)
-		if distance < minDistance {
-			minDistance = distance
-		}
-	}
-
-	if minDistance > maxDistanceMeters {
-		return nearestMatchResult{}
-	}
-	if priorityBiasMeters < 0 {
-		priorityBiasMeters = 0
-	}
-	cutoff := minDistance + priorityBiasMeters
-
-	bestDistance := math.Inf(1)
-	bestPriority := uint8(math.MaxUint8)
-	bestObjectID := 0
-	for _, i := range candidateIdxs {
-		candidate := idx.lines[i]
-		if maxOverallAngleRad > 0 && hasLineOverall && candidate.hasOverallAngle {
-			if angleDelta(lineOverallAngle, candidate.overallAngleRad) > maxOverallAngleRad {
-				continue
-			}
-		}
-		distance := minLineDistanceWithAngle(lineXY, candidate.xy, maxAngleRad)
-		if distance > cutoff {
-			continue
-		}
-		if candidate.priority < bestPriority || (candidate.priority == bestPriority && distance < bestDistance) {
-			bestPriority = candidate.priority
-			bestDistance = distance
-			bestObjectID = candidate.objectID
-		}
-	}
-
-	if bestDistance <= maxDistanceMeters {
-		return nearestMatchResult{
-			priority: bestPriority,
-			objectID: bestObjectID,
-			distance: bestDistance,
-			hasMatch: true,
-		}
-	}
-	return nearestMatchResult{}
-}
-
 func (idx *spatialIndex) candidates(minLon, minLat, maxLon, maxLat float64) []int {
 	cellWidth := (idx.maxLon - idx.minLon) / float64(idx.cols)
 	cellHeight := (idx.maxLat - idx.minLat) / float64(idx.rows)
@@ -1410,72 +1477,322 @@ func (idx *spatialIndex) candidates(minLon, minLat, maxLon, maxLat float64) []in
 	return out
 }
 
-func minLineDistance(a, b []pointXY) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return math.Inf(1)
-	}
-	if len(a) == 1 && len(b) == 1 {
-		return distancePoint(a[0], b[0])
-	}
-	if len(a) == 1 {
-		return minPointLineDistance(a[0], b)
-	}
-	if len(b) == 1 {
-		return minPointLineDistance(b[0], a)
-	}
-
-	minDist := math.Inf(1)
-	for i := 0; i < len(a)-1; i++ {
-		for j := 0; j < len(b)-1; j++ {
-			d := segmentDistance(a[i], a[i+1], b[j], b[j+1])
-			if d < minDist {
-				minDist = d
-			}
-		}
-	}
-	return minDist
+type segmentXY struct {
+	a     pointXY
+	b     pointXY
+	angle float64
 }
 
-func minLineDistanceWithAngle(a, b []pointXY, maxAngleRad float64) float64 {
-	if maxAngleRad <= 0 {
-		return minLineDistance(a, b)
+func lineSegments(points []pointXY) []segmentXY {
+	if len(points) < 2 {
+		return nil
 	}
-	if len(a) < 2 || len(b) < 2 {
-		return minLineDistance(a, b)
-	}
-
-	minDist := math.Inf(1)
-	for i := 0; i < len(a)-1; i++ {
-		angleA, okA := segmentAngle(a[i], a[i+1])
-		if !okA {
+	out := make([]segmentXY, 0, len(points)-1)
+	for i := 0; i < len(points)-1; i++ {
+		angle, ok := segmentAngle(points[i], points[i+1])
+		if !ok {
 			continue
 		}
-		for j := 0; j < len(b)-1; j++ {
-			angleB, okB := segmentAngle(b[j], b[j+1])
-			if !okB {
-				continue
-			}
-			if angleDelta(angleA, angleB) > maxAngleRad {
-				continue
-			}
-			d := segmentDistance(a[i], a[i+1], b[j], b[j+1])
-			if d < minDist {
-				minDist = d
-			}
-		}
+		out = append(out, segmentXY{
+			a:     points[i],
+			b:     points[i+1],
+			angle: angle,
+		})
 	}
-	return minDist
+	return out
 }
 
-func minPointLineDistance(point pointXY, line []pointXY) float64 {
-	minDist := math.Inf(1)
-	for i := 0; i < len(line)-1; i++ {
-		d := pointSegmentDistance(point, line[i], line[i+1])
-		if d < minDist {
-			minDist = d
+func overlapAttribution(line orb.LineString, idx *spatialIndex, sourceDataset uint8, maxDistanceMeters, maxAngleRad float64) overlapAttributionResult {
+	result := overlapAttributionResult{
+		byPriority: make(map[uint8]float64),
+		byObjectID: make(map[int]float64),
+	}
+	if idx == nil || len(line) < 2 {
+		return result
+	}
+
+	minLon, minLat, maxLon, maxLat := lineBounds(line)
+	minLon -= metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
+	maxLon += metersToDegreesLon(maxDistanceMeters, idx.projector.lat0Rad)
+	minLat -= metersToDegreesLat(maxDistanceMeters)
+	maxLat += metersToDegreesLat(maxDistanceMeters)
+
+	candidateIdxs := idx.candidates(minLon, minLat, maxLon, maxLat)
+	if len(candidateIdxs) == 0 {
+		return result
+	}
+
+	lineXY := idx.projector.lineToXY(line)
+	lineSegmentsXY := lineSegments(lineXY)
+	if len(lineSegmentsXY) == 0 {
+		return result
+	}
+	type candidateLine struct {
+		objectID int
+		priority uint8
+		segments []segmentXY
+	}
+
+	candidates := make([]candidateLine, 0, len(candidateIdxs))
+	for _, i := range candidateIdxs {
+		candidate := idx.lines[i]
+		segs := lineSegments(candidate.xy)
+		if len(segs) == 0 {
+			continue
+		}
+		candidates = append(candidates, candidateLine{
+			objectID: candidate.objectID,
+			priority: candidate.priority,
+			segments: segs,
+		})
+	}
+
+	if len(candidates) == 0 {
+		return result
+	}
+
+	for i := range lineSegmentsXY {
+		seg := lineSegmentsXY[i]
+		segLength := distancePoint(seg.a, seg.b)
+		if segLength == 0 {
+			continue
+		}
+		bestDist := math.Inf(1)
+		bestPriority := uint8(0)
+		bestObjectID := 0
+		for _, cand := range candidates {
+			for _, candSeg := range cand.segments {
+				if maxAngleRad > 0 && angleDelta(seg.angle, candSeg.angle) > maxAngleRad {
+					continue
+				}
+				d := segmentDistance(seg.a, seg.b, candSeg.a, candSeg.b)
+				if d <= maxDistanceMeters && d < bestDist {
+					bestDist = d
+					bestPriority = cand.priority
+					bestObjectID = cand.objectID
+				}
+			}
+		}
+		if bestPriority == 0 {
+			continue
+		}
+		result.assignments = append(result.assignments, segmentAssignment{
+			priority:      bestPriority,
+			start:         line[i],
+			end:           line[i+1],
+			length:        segLength,
+			objectID:      bestObjectID,
+			sourceDataset: sourceDataset,
+			segmentIndex:  i,
+		})
+		result.totalLength += segLength
+		result.byPriority[bestPriority] += segLength
+		if bestObjectID != 0 {
+			result.byObjectID[bestObjectID] += segLength
 		}
 	}
-	return minDist
+
+	return result
+}
+
+func overlapAttributionPrefer(line orb.LineString, primaryIdx *spatialIndex, primaryDataset uint8, fallbackIdx *spatialIndex, fallbackDataset uint8, maxDistanceMeters, maxAngleRad float64) overlapAttributionResult {
+	result := overlapAttributionResult{
+		byPriority: make(map[uint8]float64),
+		byObjectID: make(map[int]float64),
+	}
+	if primaryIdx == nil && fallbackIdx == nil {
+		return result
+	}
+
+	primary := overlapAttribution(line, primaryIdx, primaryDataset, maxDistanceMeters, maxAngleRad)
+	if primaryIdx == nil || fallbackIdx == nil || primary.totalLength == 0 {
+		if fallbackIdx == nil {
+			return primary
+		}
+		fallback := overlapAttribution(line, fallbackIdx, fallbackDataset, maxDistanceMeters, maxAngleRad)
+		if primary.totalLength == 0 {
+			return fallback
+		}
+		return primary
+	}
+
+	fallback := overlapAttribution(line, fallbackIdx, fallbackDataset, maxDistanceMeters, maxAngleRad)
+
+	// Merge by segment index (same line input)
+	assignments := make([]segmentAssignment, 0, len(primary.assignments)+len(fallback.assignments))
+	primaryMap := make(map[int]segmentAssignment)
+	for _, seg := range primary.assignments {
+		primaryMap[seg.segmentIndex] = seg
+	}
+	fallbackMap := make(map[int]segmentAssignment)
+	for _, seg := range fallback.assignments {
+		fallbackMap[seg.segmentIndex] = seg
+	}
+	for i := 0; i < len(line)-1; i++ {
+		if seg, ok := primaryMap[i]; ok {
+			assignments = append(assignments, seg)
+			result.totalLength += seg.length
+			result.byPriority[seg.priority] += seg.length
+			if seg.objectID != 0 {
+				result.byObjectID[seg.objectID] += seg.length
+			}
+			continue
+		}
+		if seg, ok := fallbackMap[i]; ok {
+			assignments = append(assignments, seg)
+			result.totalLength += seg.length
+			result.byPriority[seg.priority] += seg.length
+			if seg.objectID != 0 {
+				result.byObjectID[seg.objectID] += seg.length
+			}
+		}
+	}
+	result.assignments = assignments
+	return result
+}
+
+func runsFromAssignments(assignments []segmentAssignment, minRunMeters float64) []lineRun {
+	if len(assignments) == 0 {
+		return nil
+	}
+	var runs []lineRun
+	var current *lineRun
+
+	for _, seg := range assignments {
+		if seg.priority == 0 {
+			if current != nil {
+				runs = append(runs, *current)
+				current = nil
+			}
+			continue
+		}
+		if current == nil || current.priority != seg.priority || current.sourceDataset != seg.sourceDataset {
+			if current != nil {
+				runs = append(runs, *current)
+			}
+			current = &lineRun{
+				priority:      seg.priority,
+				sourceDataset: seg.sourceDataset,
+				coords:        orb.LineString{seg.start, seg.end},
+				length:        seg.length,
+			}
+			continue
+		}
+		current.coords = concatLineStrings(current.coords, orb.LineString{seg.start, seg.end})
+		current.length += seg.length
+	}
+	if current != nil {
+		runs = append(runs, *current)
+	}
+	if minRunMeters > 0 {
+		runs = mergeShortRuns(runs, minRunMeters)
+	}
+	return runs
+}
+
+func mergeShortRuns(runs []lineRun, minLen float64) []lineRun {
+	if len(runs) <= 1 {
+		return runs
+	}
+	i := 0
+	for i < len(runs) {
+		if runs[i].length >= minLen || len(runs) == 1 {
+			i++
+			continue
+		}
+		if i == 0 {
+			runs[1].coords = concatLineStrings(runs[i].coords, runs[1].coords)
+			runs[1].length += runs[i].length
+			runs = append(runs[:i], runs[i+1:]...)
+			continue
+		}
+		if i == len(runs)-1 {
+			runs[i-1].coords = concatLineStrings(runs[i-1].coords, runs[i].coords)
+			runs[i-1].length += runs[i].length
+			runs = append(runs[:i], runs[i+1:]...)
+			i--
+			continue
+		}
+		prevLen := runs[i-1].length
+		nextLen := runs[i+1].length
+		if nextLen >= prevLen {
+			runs[i+1].coords = concatLineStrings(runs[i].coords, runs[i+1].coords)
+			runs[i+1].length += runs[i].length
+			runs = append(runs[:i], runs[i+1:]...)
+			continue
+		}
+		runs[i-1].coords = concatLineStrings(runs[i-1].coords, runs[i].coords)
+		runs[i-1].length += runs[i].length
+		runs = append(runs[:i], runs[i+1:]...)
+		i--
+	}
+	return runs
+}
+
+func concatLineStrings(a, b orb.LineString) orb.LineString {
+	if len(a) == 0 {
+		return append(orb.LineString{}, b...)
+	}
+	if len(b) == 0 {
+		return a
+	}
+	if a[len(a)-1] == b[0] {
+		return append(a, b[1:]...)
+	}
+	return append(a, b...)
+}
+
+func dominantObjectID(byObjectID map[int]float64) int {
+	var bestID int
+	bestLen := 0.0
+	for id, length := range byObjectID {
+		if length > bestLen {
+			bestLen = length
+			bestID = id
+		}
+	}
+	return bestID
+}
+
+func dominantPriority(byPriority map[uint8]float64) uint8 {
+	var bestPriority uint8
+	bestLen := 0.0
+	for p, length := range byPriority {
+		if length > bestLen {
+			bestLen = length
+			bestPriority = p
+		}
+	}
+	return bestPriority
+}
+
+func lineLengthMeters(line orb.LineString, proj projector) float64 {
+	if len(line) < 2 {
+		return 0
+	}
+	xy := proj.lineToXY(line)
+	total := 0.0
+	for i := 0; i < len(xy)-1; i++ {
+		total += distancePoint(xy[i], xy[i+1])
+	}
+	return total
+}
+
+func projectorForLine(line orb.LineString) projector {
+	if len(line) == 0 {
+		return projector{}
+	}
+	minLat, maxLat := line[0][1], line[0][1]
+	for _, pt := range line[1:] {
+		if pt[1] < minLat {
+			minLat = pt[1]
+		}
+		if pt[1] > maxLat {
+			maxLat = pt[1]
+		}
+	}
+	lat0 := (minLat + maxLat) / 2
+	return projector{lat0Rad: deg2rad(lat0)}
 }
 
 func segmentDistance(a1, a2, b1, b2 pointXY) float64 {
@@ -1555,23 +1872,6 @@ func segmentAngle(a, b pointXY) (float64, bool) {
 		return 0, false
 	}
 	return math.Atan2(dy, dx), true
-}
-
-func overallLineAngle(points []pointXY) (float64, bool) {
-	if len(points) < 2 {
-		return 0, false
-	}
-	start := points[0]
-	end := points[len(points)-1]
-	if start == end {
-		for i := len(points) - 2; i >= 0; i-- {
-			if points[i] != start {
-				end = points[i]
-				break
-			}
-		}
-	}
-	return segmentAngle(start, end)
 }
 
 func angleDelta(a, b float64) float64 {

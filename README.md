@@ -35,4 +35,4 @@ From those it derives states.
 
 `index.html` loads `features.bin` and `features_cycling.bin` for lines to show on the map (sidewalk and cycling modes) and queries [this condensed events data](https://hrm.datasette.danp.net/snow/snowhfx) for the current weather event state and last weather event end time.
 
-The site runs on GitHub Pages, served from the [`pages`](https://github.com/danp/snowhfx/tree/pages) branch.
+The site runs on GitHub Pages.

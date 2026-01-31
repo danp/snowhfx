@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/danp/snowhfx/internal/featuresbin"
 )
 
 type geojsonFeatureCollection struct {
@@ -23,15 +23,7 @@ type geojsonFeature struct {
 
 type geojsonGeometry struct {
 	Type        string      `json:"type"`
-	Coordinates [][]float64 `json:"coordinates"`
-}
-
-type decodedFeature struct {
-	title         string
-	priority      uint8
-	sourceDataset uint8
-	routeID       uint16
-	coords        [][]float64
+	Coordinates interface{} `json:"coordinates"`
 }
 
 func writeGeoJSON(t *testing.T, path string, fc geojsonFeatureCollection) {
@@ -45,120 +37,29 @@ func writeGeoJSON(t *testing.T, path string, fc geojsonFeatureCollection) {
 	}
 }
 
+type decodedFeature struct {
+	title         string
+	priority      uint8
+	sourceDataset uint8
+	routeID       uint16
+	coords        [][]float64
+}
+
 func readFeaturesBin(t *testing.T, path string) []decodedFeature {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	features, _, _, err := featuresbin.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read features: %v", err)
 	}
-	r := bytes.NewReader(data)
-	var segCount uint32
-	if err := binary.Read(r, binary.LittleEndian, &segCount); err != nil {
-		t.Fatalf("read segments: %v", err)
-	}
-	var globalMinLon, globalMinLat float64
-	if err := binary.Read(r, binary.LittleEndian, &globalMinLon); err != nil {
-		t.Fatalf("read global min lon: %v", err)
-	}
-	if err := binary.Read(r, binary.LittleEndian, &globalMinLat); err != nil {
-		t.Fatalf("read global min lat: %v", err)
-	}
-	var routeCount uint16
-	if err := binary.Read(r, binary.LittleEndian, &routeCount); err != nil {
-		t.Fatalf("read route count: %v", err)
-	}
-	for i := uint16(0); i < routeCount; i++ {
-		var maintLen uint8
-		if err := binary.Read(r, binary.LittleEndian, &maintLen); err != nil {
-			t.Fatalf("read maint len: %v", err)
-		}
-		if maintLen > 0 {
-			if _, err := r.Seek(int64(maintLen), 1); err != nil {
-				t.Fatalf("skip maint: %v", err)
-			}
-		}
-		var routeLen uint8
-		if err := binary.Read(r, binary.LittleEndian, &routeLen); err != nil {
-			t.Fatalf("read route len: %v", err)
-		}
-		if routeLen > 0 {
-			if _, err := r.Seek(int64(routeLen), 1); err != nil {
-				t.Fatalf("skip route: %v", err)
-			}
-		}
-	}
-
-	var out []decodedFeature
-	for i := uint32(0); i < segCount; i++ {
-		var deltaMinLon, deltaMinLat, deltaMaxLon, deltaMaxLat int32
-		if err := binary.Read(r, binary.LittleEndian, &deltaMinLon); err != nil {
-			t.Fatalf("read seg min lon: %v", err)
-		}
-		if err := binary.Read(r, binary.LittleEndian, &deltaMinLat); err != nil {
-			t.Fatalf("read seg min lat: %v", err)
-		}
-		if err := binary.Read(r, binary.LittleEndian, &deltaMaxLon); err != nil {
-			t.Fatalf("read seg max lon: %v", err)
-		}
-		if err := binary.Read(r, binary.LittleEndian, &deltaMaxLat); err != nil {
-			t.Fatalf("read seg max lat: %v", err)
-		}
-		_ = deltaMinLon
-		_ = deltaMinLat
-		_ = deltaMaxLon
-		_ = deltaMaxLat
-
-		var featureCount uint32
-		if err := binary.Read(r, binary.LittleEndian, &featureCount); err != nil {
-			t.Fatalf("read feature count: %v", err)
-		}
-
-		for j := uint32(0); j < featureCount; j++ {
-			var titleLen uint8
-			if err := binary.Read(r, binary.LittleEndian, &titleLen); err != nil {
-				t.Fatalf("read title len: %v", err)
-			}
-			titleBytes := make([]byte, titleLen)
-			if _, err := r.Read(titleBytes); err != nil {
-				t.Fatalf("read title: %v", err)
-			}
-			var priority uint8
-			if err := binary.Read(r, binary.LittleEndian, &priority); err != nil {
-				t.Fatalf("read priority: %v", err)
-			}
-			var sourceDataset uint8
-			if err := binary.Read(r, binary.LittleEndian, &sourceDataset); err != nil {
-				t.Fatalf("read source dataset: %v", err)
-			}
-			var routeID uint16
-			if err := binary.Read(r, binary.LittleEndian, &routeID); err != nil {
-				t.Fatalf("read route id: %v", err)
-			}
-			var coordCount uint16
-			if err := binary.Read(r, binary.LittleEndian, &coordCount); err != nil {
-				t.Fatalf("read coord count: %v", err)
-			}
-			coords := make([][]float64, 0, coordCount)
-			for k := uint16(0); k < coordCount; k++ {
-				var dLon, dLat int32
-				if err := binary.Read(r, binary.LittleEndian, &dLon); err != nil {
-					t.Fatalf("read coord lon: %v", err)
-				}
-				if err := binary.Read(r, binary.LittleEndian, &dLat); err != nil {
-					t.Fatalf("read coord lat: %v", err)
-				}
-				lon := globalMinLon + float64(dLon)/1000000
-				lat := globalMinLat + float64(dLat)/1000000
-				coords = append(coords, []float64{lon, lat})
-			}
-			out = append(out, decodedFeature{
-				title:         string(titleBytes),
-				priority:      priority,
-				sourceDataset: sourceDataset,
-				routeID:       routeID,
-				coords:        coords,
-			})
-		}
+	out := make([]decodedFeature, 0, len(features))
+	for _, feat := range features {
+		out = append(out, decodedFeature{
+			title:         feat.Title,
+			priority:      feat.Priority,
+			sourceDataset: feat.SourceDataset,
+			routeID:       feat.RouteID,
+			coords:        feat.Coords,
+		})
 	}
 	return out
 }
@@ -216,15 +117,13 @@ func runWithGeoJSON(t *testing.T, travelways, bike, ice geojsonFeatureCollection
 	writeGeoJSON(t, icePath, ice)
 
 	cfg := runConfig{
-		TravelwaysFile:     travelwaysPath,
-		BikeFile:           bikePath,
-		IceFile:            icePath,
-		TravelwaysOut:      travelwaysOut,
-		BikeOut:            bikeOut,
-		MaxMatchMeters:     30,
-		MaxAngleDeg:        30,
-		MaxOverallAngleDeg: 60,
-		PriorityBiasMeters: 1,
+		TravelwaysFile: travelwaysPath,
+		BikeFile:       bikePath,
+		IceFile:        icePath,
+		TravelwaysOut:  travelwaysOut,
+		BikeOut:        bikeOut,
+		MaxMatchMeters: 30,
+		MaxAngleDeg:    30,
 	}
 	if err := run(context.Background(), cfg); err != nil {
 		t.Fatalf("run: %v", err)
@@ -315,6 +214,54 @@ func TestTravelwaysFeaturesBin(t *testing.T) {
 	}
 	if len(feature.coords) == 0 {
 		t.Fatal("missing travelway coords")
+	}
+}
+
+func TestTravelwaysRequiresLocation(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  10,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  11,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Valid Name Line",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{5, 5}, {5.001, 5}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{Type: "FeatureCollection"}
+	ice := geojsonFeatureCollection{Type: "FeatureCollection"}
+	bike, ice = addBaselineBikeAndIce(bike, ice)
+
+	travelwaysOut, _ := runWithGeoJSON(t, travelways, bike, ice)
+	features := readFeaturesBin(t, travelwaysOut)
+	if len(features) != 1 {
+		t.Fatalf("expected 1 travelway feature, got %d", len(features))
+	}
+	if features[0].title != "Valid Name Line" {
+		t.Fatalf("unexpected title: %q", features[0].title)
 	}
 }
 
@@ -489,8 +436,10 @@ func TestBikeFeaturesBin(t *testing.T) {
 			minCount:     1,
 			expectedTests: []expectedBikeFeature{
 				{
-					title:   "Test Protected",
-					present: false,
+					title:         "Test Protected",
+					present:       true,
+					priority:      1,
+					sourceDataset: datasetTravelways,
 				},
 				{
 					title:   "Baseline Bike",
@@ -665,5 +614,340 @@ func TestBikeFeaturesBin(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBikeMultiLinePreserved(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  1,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Split Trail",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  200,
+					"WINT_PLOW": "Y",
+					"BIKETYPE":  "MUPATH",
+					"PROT_TYPE": "OFFSTREET",
+					"BIKE_NAME": "Split Trail",
+				},
+				Geometry: geojsonGeometry{
+					Type: "MultiLineString",
+					Coordinates: [][][]float64{
+						{{0, 0}, {0.001, 0}},
+						{{0, 1}, {0.001, 1}},
+					},
+				},
+			},
+		},
+	}
+	ice := geojsonFeatureCollection{Type: "FeatureCollection"}
+	ice.Features = append(ice.Features, geojsonFeature{
+		Type: "Feature",
+		Properties: map[string]interface{}{
+			"PRIORITY": "1",
+		},
+		Geometry: geojsonGeometry{
+			Type:        "LineString",
+			Coordinates: [][]float64{{0, 1}, {0.001, 1}},
+		},
+	})
+
+	dir := t.TempDir()
+	travelwaysPath := filepath.Join(dir, "travelways.geojson")
+	bikePath := filepath.Join(dir, "bike.geojson")
+	icePath := filepath.Join(dir, "ice.geojson")
+	travelwaysOut := filepath.Join(dir, "features.bin")
+	bikeOut := filepath.Join(dir, "features_cycling.bin")
+
+	writeGeoJSON(t, travelwaysPath, travelways)
+	writeGeoJSON(t, bikePath, bike)
+	writeGeoJSON(t, icePath, ice)
+
+	cfg := runConfig{
+		TravelwaysFile: travelwaysPath,
+		BikeFile:       bikePath,
+		IceFile:        icePath,
+		TravelwaysOut:  travelwaysOut,
+		BikeOut:        bikeOut,
+		MaxMatchMeters: 30,
+		MaxAngleDeg:    30,
+		MinRunMeters:   0,
+	}
+	if err := run(context.Background(), cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	features := readFeaturesBin(t, bikeOut)
+	var count, travelCount, iceCount int
+	for _, feat := range features {
+		if feat.title != "Split Trail" {
+			continue
+		}
+		count++
+		if feat.sourceDataset == datasetTravelways {
+			travelCount++
+		}
+		if feat.sourceDataset == datasetIce {
+			iceCount++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 split trail features, got %d", count)
+	}
+	if travelCount == 0 || iceCount == 0 {
+		t.Fatalf("expected travelways+ice split, got travelways=%d ice=%d", travelCount, iceCount)
+	}
+}
+
+func TestBikeOverlapRuns(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  1,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Far Trail",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{10, 10}, {10.001, 10}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  300,
+					"WINT_PLOW": "Y",
+					"BIKETYPE":  "BRMAINRD",
+					"PROT_TYPE": "NONE",
+					"BIKE_NAME": "Overlap Run",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.0009, 0}, {0.0018, 0}},
+				},
+			},
+		},
+	}
+	ice := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type:       "Feature",
+				Properties: map[string]interface{}{"PRIORITY": "1"},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.0005, 0}},
+				},
+			},
+			{
+				Type:       "Feature",
+				Properties: map[string]interface{}{"PRIORITY": "2"},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0.0013, 0}, {0.0018, 0}},
+				},
+			},
+		},
+	}
+
+	dir := t.TempDir()
+	travelwaysPath := filepath.Join(dir, "travelways.geojson")
+	bikePath := filepath.Join(dir, "bike.geojson")
+	icePath := filepath.Join(dir, "ice.geojson")
+	travelwaysOut := filepath.Join(dir, "features.bin")
+	bikeOut := filepath.Join(dir, "features_cycling.bin")
+
+	writeGeoJSON(t, travelwaysPath, travelways)
+	writeGeoJSON(t, bikePath, bike)
+	writeGeoJSON(t, icePath, ice)
+
+	cfg := runConfig{
+		TravelwaysFile: travelwaysPath,
+		BikeFile:       bikePath,
+		IceFile:        icePath,
+		TravelwaysOut:  travelwaysOut,
+		BikeOut:        bikeOut,
+		MaxMatchMeters: 30,
+		MaxAngleDeg:    30,
+		MinRunMeters:   0,
+	}
+	if err := run(context.Background(), cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	features := readFeaturesBin(t, bikeOut)
+	var p1, p2 int
+	for _, feat := range features {
+		if feat.title != "Overlap Run" {
+			continue
+		}
+		switch feat.priority {
+		case 1:
+			p1++
+		case 2:
+			p2++
+		}
+	}
+	if p1 == 0 || p2 == 0 {
+		t.Fatalf("expected overlap runs with priorities 1 and 2, got p1=%d p2=%d", p1, p2)
+	}
+}
+
+func TestBikeOffstreetFallbackToIce(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  1,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Far Trail",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{10, 10}, {10.001, 10}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  400,
+					"WINT_PLOW": "Y",
+					"BIKETYPE":  "MUPATH",
+					"PROT_TYPE": "OFFSTREET",
+					"BIKE_NAME": "Offstreet Fallback",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+		},
+	}
+	ice := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type:       "Feature",
+				Properties: map[string]interface{}{"PRIORITY": "1"},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+		},
+	}
+
+	_, bikeOut := runWithGeoJSON(t, travelways, bike, ice)
+	features := readFeaturesBin(t, bikeOut)
+	found := false
+	for _, feat := range features {
+		if feat.title == "Offstreet Fallback" && feat.sourceDataset == datasetIce {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected offstreet fallback to ice")
+	}
+}
+
+func TestBikeNameFallbackFromTravelways(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  1,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Fallback Name Trail",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  500,
+					"WINT_PLOW": "Y",
+					"BIKETYPE":  "MUPATH",
+					"PROT_TYPE": "OFFSTREET",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+		},
+	}
+	ice := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type:       "Feature",
+				Properties: map[string]interface{}{"PRIORITY": "1"},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{5, 5}, {5.001, 5}},
+				},
+			},
+		},
+	}
+
+	_, bikeOut := runWithGeoJSON(t, travelways, bike, ice)
+	features := readFeaturesBin(t, bikeOut)
+	found := false
+	for _, feat := range features {
+		if feat.title == "Fallback Name Trail" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected name fallback from travelways")
 	}
 }
