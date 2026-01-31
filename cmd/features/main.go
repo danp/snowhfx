@@ -1325,6 +1325,8 @@ type lineRun struct {
 	coords        orb.LineString
 	length        float64
 	byObjectID    map[int]float64
+	startSegment  int
+	endSegment    int
 }
 
 type cellKey struct {
@@ -1664,6 +1666,7 @@ func runsFromAssignments(assignments []segmentAssignment, minRunMeters float64) 
 	}
 	var runs []lineRun
 	var current *lineRun
+	lastSegment := -1
 
 	for _, seg := range assignments {
 		if seg.priority == 0 {
@@ -1671,7 +1674,14 @@ func runsFromAssignments(assignments []segmentAssignment, minRunMeters float64) 
 				runs = append(runs, *current)
 				current = nil
 			}
+			lastSegment = -1
 			continue
+		}
+		if lastSegment != -1 && seg.segmentIndex != lastSegment+1 {
+			if current != nil {
+				runs = append(runs, *current)
+				current = nil
+			}
 		}
 		if current == nil || current.priority != seg.priority || current.sourceDataset != seg.sourceDataset {
 			if current != nil {
@@ -1683,17 +1693,22 @@ func runsFromAssignments(assignments []segmentAssignment, minRunMeters float64) 
 				coords:        orb.LineString{seg.start, seg.end},
 				length:        seg.length,
 				byObjectID:    make(map[int]float64),
+				startSegment:  seg.segmentIndex,
+				endSegment:    seg.segmentIndex,
 			}
 			if seg.objectID != 0 {
 				current.byObjectID[seg.objectID] = seg.length
 			}
+			lastSegment = seg.segmentIndex
 			continue
 		}
 		current.coords = concatLineStrings(current.coords, orb.LineString{seg.start, seg.end})
 		current.length += seg.length
+		current.endSegment = seg.segmentIndex
 		if seg.objectID != 0 {
 			current.byObjectID[seg.objectID] += seg.length
 		}
+		lastSegment = seg.segmentIndex
 	}
 	if current != nil {
 		runs = append(runs, *current)
@@ -1715,14 +1730,34 @@ func mergeShortRuns(runs []lineRun, minLen float64) []lineRun {
 			continue
 		}
 		if i == 0 {
+			if runs[i].endSegment+1 != runs[1].startSegment {
+				i++
+				continue
+			}
 			runs[1].coords = concatLineStrings(runs[i].coords, runs[1].coords)
 			runs[1].length += runs[i].length
+			if runs[i].startSegment < runs[1].startSegment {
+				runs[1].startSegment = runs[i].startSegment
+			}
+			for id, length := range runs[i].byObjectID {
+				runs[1].byObjectID[id] += length
+			}
 			runs = append(runs[:i], runs[i+1:]...)
 			continue
 		}
 		if i == len(runs)-1 {
+			if runs[i-1].endSegment+1 != runs[i].startSegment {
+				i++
+				continue
+			}
 			runs[i-1].coords = concatLineStrings(runs[i-1].coords, runs[i].coords)
 			runs[i-1].length += runs[i].length
+			if runs[i].endSegment > runs[i-1].endSegment {
+				runs[i-1].endSegment = runs[i].endSegment
+			}
+			for id, length := range runs[i].byObjectID {
+				runs[i-1].byObjectID[id] += length
+			}
 			runs = append(runs[:i], runs[i+1:]...)
 			i--
 			continue
@@ -1730,13 +1765,33 @@ func mergeShortRuns(runs []lineRun, minLen float64) []lineRun {
 		prevLen := runs[i-1].length
 		nextLen := runs[i+1].length
 		if nextLen >= prevLen {
+			if runs[i].endSegment+1 != runs[i+1].startSegment {
+				i++
+				continue
+			}
 			runs[i+1].coords = concatLineStrings(runs[i].coords, runs[i+1].coords)
 			runs[i+1].length += runs[i].length
+			if runs[i].startSegment < runs[i+1].startSegment {
+				runs[i+1].startSegment = runs[i].startSegment
+			}
+			for id, length := range runs[i].byObjectID {
+				runs[i+1].byObjectID[id] += length
+			}
 			runs = append(runs[:i], runs[i+1:]...)
+			continue
+		}
+		if runs[i-1].endSegment+1 != runs[i].startSegment {
+			i++
 			continue
 		}
 		runs[i-1].coords = concatLineStrings(runs[i-1].coords, runs[i].coords)
 		runs[i-1].length += runs[i].length
+		if runs[i].endSegment > runs[i-1].endSegment {
+			runs[i-1].endSegment = runs[i].endSegment
+		}
+		for id, length := range runs[i].byObjectID {
+			runs[i-1].byObjectID[id] += length
+		}
 		runs = append(runs[:i], runs[i+1:]...)
 		i--
 	}
