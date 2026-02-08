@@ -11,6 +11,7 @@ import (
 
 type outputFeature struct {
 	Index         int           `json:"index"`
+	StableID      string        `json:"stable_id,omitempty"`
 	Title         string        `json:"title"`
 	Priority      uint8         `json:"priority"`
 	SourceDataset uint8         `json:"source_dataset"`
@@ -67,6 +68,7 @@ func main() {
 		}
 		out.Features = append(out.Features, outputFeature{
 			Index:         i,
+			StableID:      feat.StableID,
 			Title:         feat.Title,
 			Priority:      feat.Priority,
 			SourceDataset: feat.SourceDataset,

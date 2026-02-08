@@ -86,17 +86,8 @@
       color: #fff;
       font-weight: 700;
     }
-    .gear-toggle {
-      border: 1px solid var(--control-border);
-      border-radius: 6px;
-      background: var(--control-bg);
-      padding: 4px 8px;
-      font-size: 14px;
-      cursor: pointer;
-      display: none;
-      color: var(--text-primary);
-    }
-    .about-toggle {
+    .about-toggle,
+    .reports-filter-toggle {
       border: 1px solid var(--control-border);
       border-radius: 6px;
       background: var(--control-bg);
@@ -104,6 +95,17 @@
       font-size: 12px;
       cursor: pointer;
       color: var(--text-primary);
+    }
+    .reports-filter-toggle {
+      width: 64px;
+      text-align: center;
+      font-weight: 500;
+    }
+    .reports-filter-toggle.is-active {
+      background: var(--toggle-active);
+      color: #fff;
+      border-color: var(--toggle-active);
+      font-weight: 700;
     }
     .skip-link {
       position: absolute;
@@ -123,15 +125,15 @@
       transform: translateY(0);
     }
     .quick-toggle button:focus-visible,
-    .gear-toggle:focus-visible,
-    .about-toggle:focus-visible {
+    .about-toggle:focus-visible,
+    .reports-filter-toggle:focus-visible {
       outline: 2px solid #017A74;
       outline-offset: 2px;
     }
     @media (prefers-color-scheme: dark) {
       .quick-toggle button:focus-visible,
-      .gear-toggle:focus-visible,
-      .about-toggle:focus-visible {
+      .about-toggle:focus-visible,
+      .reports-filter-toggle:focus-visible {
         outline-color: #78c2b7;
       }
     }
@@ -193,6 +195,10 @@
     .priority-deadline {
       font-size: 14px;
       color: #fff;
+    }
+    .priority-deadline-date,
+    .priority-deadline-time {
+      display: inline;
     }
     .about-panel {
       position: fixed;
@@ -317,6 +323,16 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .community-report-feature-text {
+      margin: 0;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .community-reporter-id {
+      margin: -4px 0 0;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
     .report-footer {
       display: flex;
       align-items: center;
@@ -369,7 +385,8 @@
       flex: 1 1 100%;
       min-height: 16px;
     }
-    .popup-311-button {
+    .popup-311-button,
+    .popup-community-button {
       margin-top: 8px;
       border: 1px solid #0f786f;
       border-radius: 8px;
@@ -379,6 +396,30 @@
       font-size: 12px;
       cursor: pointer;
       font-weight: 600;
+    }
+    .popup-community-button {
+      background: #2e5b9a;
+      border-color: #2e5b9a;
+      margin-left: 0;
+    }
+    .popup-community-button + .popup-311-button {
+      margin-left: 6px;
+    }
+    .community-condition-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 10px;
+    }
+    .community-condition-list label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 500;
+    }
+    .popup-report-list {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
     }
     .leaflet-popup-content-wrapper,
     .leaflet-popup-tip {
@@ -403,38 +444,23 @@
       .priority-deadline {
         text-align: center;
       }
-      .gear-toggle {
-        display: inline-flex;
-      }
       .priority-item {
-        padding: 6px 8px;
+        padding: 6px 8px 6px 28px;
       }
       .priority-deadline {
         font-weight: bold;
       }
-      .priority-item::before {
-        content: "";
-      }
-      body.mobile-expanded .priority-item {
-        padding: 6px 8px 6px 28px;
-      }
-      body.mobile-expanded .priority-1::before {
-        content: "P1";
-      }
-      body.mobile-expanded .priority-2::before {
-        content: "P2";
-      }
-      body.mobile-expanded .priority-3::before {
-        content: "P3";
-      }
-      .about-toggle {
-        display: none;
-      }
-      body.mobile-expanded .about-toggle {
-        display: inline-flex;
+      .priority-deadline-date,
+      .priority-deadline-time {
+        display: block;
+        line-height: 1.05;
       }
       .report-email-body {
         min-height: 140px;
+      }
+      .community-condition-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px 8px;
       }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -451,11 +477,11 @@
     <div class="priorities" id="priorities-header"></div>
     <div class="mobile-controls" id="mobile-controls">
       <button class="about-toggle" id="about-toggle" type="button" aria-expanded="false" aria-controls="about-panel">About</button>
+      <button class="reports-filter-toggle" id="reports-filter-toggle" type="button" aria-pressed="false">Reports</button>
       <div class="quick-toggle" role="group" aria-label="Map mode">
-        <button type="button" data-mode="sidewalks" data-short="S" data-full="Sidewalks" aria-label="Sidewalks">S</button>
-        <button type="button" data-mode="cycling" data-short="C" data-full="Cycling" aria-label="Cycling">C</button>
+        <button type="button" data-mode="sidewalks" data-full="Sidewalks" aria-label="Sidewalks">Sidewalks</button>
+        <button type="button" data-mode="cycling" data-full="Cycling" aria-label="Cycling">Cycling</button>
       </div>
-      <button class="gear-toggle" id="gear-toggle" type="button" aria-label="More options">⚙</button>
     </div>
   </div>
   <div id="map" role="region" aria-label="Map of Halifax snow clearing priorities for sidewalks and cycling routes"></div>
@@ -522,6 +548,42 @@
       </div>
     </div>
   </div>
+  <div class="report-panel" id="community-report-panel" aria-hidden="true">
+    <div class="report-card" role="dialog" aria-modal="true" aria-labelledby="community-report-title">
+      <div class="report-header">
+        <h2 id="community-report-title">Community condition report</h2>
+        <p class="report-subtitle">Reports are public and only contain the info you see here.</p>
+      </div>
+      <div class="report-form">
+        <div class="report-field">
+          <label id="community-report-feature-label">Location</label>
+          <p class="community-report-feature-text" id="community-report-feature" aria-labelledby="community-report-feature-label"></p>
+        </div>
+        <div class="report-field">
+          <label>Current conditions / treatment</label>
+          <div class="community-condition-list">
+            <label><input type="checkbox" name="community-condition" value="snow_covered"> Snow covered</label>
+            <label><input type="checkbox" name="community-condition" value="cleared"> Cleared</label>
+            <label><input type="checkbox" name="community-condition" value="icy"> Icy</label>
+            <label><input type="checkbox" name="community-condition" value="salted"> Salted</label>
+            <label><input type="checkbox" name="community-condition" value="needs_salt"> Needs salt</label>
+          </div>
+        </div>
+        <div class="report-field">
+          <label for="community-report-notes">Notes (optional)</label>
+          <textarea class="report-textarea" id="community-report-notes" name="community-notes" placeholder="Optional details."></textarea>
+        </div>
+        <div class="report-footer">
+          <span class="report-status-message" id="community-report-status" aria-live="polite"></span>
+          <div class="report-actions">
+            <button class="report-email-link" id="community-report-save" type="button">Save report</button>
+            <button class="report-close" id="community-report-close" type="button">Close</button>
+          </div>
+        </div>
+        <p class="community-reporter-id" id="community-reporter-id"></p>
+      </div>
+    </div>
+  </div>
   <script>
     // Initialize the Leaflet map.
     var map = L.map('map', { preferCanvas: true });
@@ -579,96 +641,159 @@
       return trimMinutes(d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
     }
 
+    function formatDeadlineParts(deadline) {
+      if (!deadline) {
+        return { date: 'Pending', time: '' };
+      }
+      const d = new Date(deadline);
+      const now = new Date();
+      const trimMinutes = (value) => value.replace(':00 ', ' ');
+      const recent = d > now - (3 * 86400 * 1000);
+      const datePart = recent
+        ? d.toLocaleDateString('en-US', { weekday: 'short' })
+        : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const timePart = trimMinutes(d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }));
+      return { date: datePart, time: timePart };
+    }
+
     /**
      * Decode segmented features from the binary file.
      *
-     * Expected binary layout:
-     * - uint32: numberOfSegments
-     * - float64: globalBaseLon
-     * - float64: globalBaseLat
-     * - uint16: numberOfRoutes
-     *   - uint8: maintLength
-     *   - [maintLength] bytes: WINT_MAINT string
-     *   - uint8: routeLength
-     *   - [routeLength] bytes: WINT_ROUTE string
+     * Format v4:
+     *   "SHFX" magic (4 bytes), uint8 version,
+     *   varint segmentCount, float64 baseLon, float64 baseLat,
+     *   varint routeCount, varint namePieceCount.
+     *   Shared string pieces are stored first, then routes encoded as piece IDs.
+     *   Each feature stores stable ID piece IDs (3-char chunks) and title piece IDs.
+     *   Integer fields use varint; signed deltas use zigzag-varint.
      *
-     * For each segment:
-     *   - int32: segDeltaMinLon
-     *   - int32: segDeltaMinLat
-     *   - int32: segDeltaMaxLon
-     *   - int32: segDeltaMaxLat
-     *   - uint32: numberOfFeaturesInSegment
-     *
-     *   For each feature:
-     *     - uint8: titleLength
-     *     - [titleLength] bytes: title string
-     *     - uint8: priority
-     *     - uint8: sourceDataset
-     *     - uint16: routeID (0 = none)
-     *     - uint16: coordinateCount
-     *     - For each coordinate:
-     *         - int32: deltaLon
-     *         - int32: deltaLat
-     *
-     * (All delta values are relative to the global base and use a multiplier of 1e6.)
+     * Coordinate deltas are relative to global base lon/lat and scaled by 1e6.
      */
     async function decodeSegmentedFeatures(arrayBuffer) {
       const dataView = new DataView(arrayBuffer);
+      const textDecoder = new TextDecoder();
       let offset = 0;
-      const segmentCount = dataView.getUint32(offset, true);
-      offset += 4;
+      const readUVarint = () => {
+        let value = 0;
+        let shift = 0;
+        for (let i = 0; i < 10; i++) {
+          if (offset >= dataView.byteLength) {
+            throw new Error('Unexpected EOF while reading varint');
+          }
+          const b = dataView.getUint8(offset); offset += 1;
+          value += (b & 0x7f) * (2 ** shift);
+          if ((b & 0x80) === 0) {
+            return value;
+          }
+          shift += 7;
+        }
+        throw new Error('Invalid varint: too long');
+      };
+      const readVarintZigZag = () => {
+        const u = readUVarint();
+        return (u % 2 === 0) ? (u / 2) : -((u + 1) / 2);
+      };
+      if (dataView.byteLength < 5) {
+        throw new Error('Invalid features file: too short');
+      }
+      const magic = String.fromCharCode(
+        dataView.getUint8(0),
+        dataView.getUint8(1),
+        dataView.getUint8(2),
+        dataView.getUint8(3)
+      );
+      if (magic !== 'SHFX') {
+        throw new Error(`Unsupported features magic: ${magic}`);
+      }
+      const formatVersion = dataView.getUint8(4);
+      if (formatVersion !== 4) {
+        throw new Error(`Unsupported features format version: ${formatVersion}`);
+      }
+      offset = 5;
+      const segmentCount = readUVarint();
       const baseLon = dataView.getFloat64(offset, true);
       offset += 8;
       const baseLat = dataView.getFloat64(offset, true);
       offset += 8;
-      const routeCount = dataView.getUint16(offset, true);
-      offset += 2;
+      const routeCount = readUVarint();
+      const namePieceCount = readUVarint();
+      const namePieces = [null];
+      for (let n = 0; n < namePieceCount; n++) {
+        const nameLength = readUVarint();
+        const name = textDecoder.decode(new Uint8Array(arrayBuffer, offset, nameLength));
+        offset += nameLength;
+        namePieces.push(name);
+      }
       routeTable = [null];
       for (let r = 0; r < routeCount; r++) {
-        const maintLength = dataView.getUint8(offset); offset += 1;
-        const maint = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, maintLength));
-        offset += maintLength;
-        const routeLength = dataView.getUint8(offset); offset += 1;
-        const route = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, routeLength));
-        offset += routeLength;
-        routeTable.push({ maint, route });
+        const maintCount = readUVarint();
+        const maintParts = [];
+        for (let i = 0; i < maintCount; i++) {
+          const pieceID = readUVarint();
+          maintParts.push(namePieces[pieceID] || '');
+        }
+        const routeNameCount = readUVarint();
+        const routeParts = [];
+        for (let i = 0; i < routeNameCount; i++) {
+          const pieceID = readUVarint();
+          routeParts.push(namePieces[pieceID] || '');
+        }
+        routeTable.push({ maint: maintParts.join(' '), route: routeParts.join(' ') });
       }
 
       const segments = [];
       for (let s = 0; s < segmentCount; s++) {
         // Read the segment's bounding box (as deltas from the global base).
-        const segDeltaMinLon = dataView.getInt32(offset, true); offset += 4;
-        const segDeltaMinLat = dataView.getInt32(offset, true); offset += 4;
-        const segDeltaMaxLon = dataView.getInt32(offset, true); offset += 4;
-        const segDeltaMaxLat = dataView.getInt32(offset, true); offset += 4;
+        const segDeltaMinLon = readVarintZigZag();
+        const segDeltaMinLat = readVarintZigZag();
+        const segDeltaMaxLon = readVarintZigZag();
+        const segDeltaMaxLat = readVarintZigZag();
         const segBounds = L.latLngBounds(
           [baseLat + segDeltaMinLat / 1000000, baseLon + segDeltaMinLon / 1000000],
           [baseLat + segDeltaMaxLat / 1000000, baseLon + segDeltaMaxLon / 1000000]
         );
 
         // Read the number of features in this segment.
-        const numFeatures = dataView.getUint32(offset, true);
-        offset += 4;
+        const numFeatures = readUVarint();
         const features = [];
         for (let i = 0; i < numFeatures; i++) {
-          // Read title.
-          const titleLength = dataView.getUint8(offset); offset += 1;
-          const title = new TextDecoder().decode(new Uint8Array(arrayBuffer, offset, titleLength));
-          offset += titleLength;
-          // Read priority.
-          const priority = dataView.getUint8(offset); offset += 1;
-          const sourceDataset = dataView.getUint8(offset); offset += 1;
-          const routeID = dataView.getUint16(offset, true); offset += 2;
-          // Read coordinate count.
-          const coordCount = dataView.getUint16(offset, true); offset += 2;
-          const coords = [];
-          for (let j = 0; j < coordCount; j++) {
-            const deltaLon = dataView.getInt32(offset, true) / 1000000; offset += 4;
-            const deltaLat = dataView.getInt32(offset, true) / 1000000; offset += 4;
-            // Leaflet expects [lat, lon].
-            coords.push([baseLat + deltaLat, baseLon + deltaLon]);
+          const stablePieceCount = readUVarint();
+          const stableParts = [];
+          for (let p = 0; p < stablePieceCount; p++) {
+            const pieceID = readUVarint();
+            stableParts.push(namePieces[pieceID] || '');
           }
-          features.push({ title, priority, coords, sourceDataset, routeID });
+          const stableID = stableParts.join('');
+          const pieceCount = readUVarint();
+          const titleParts = [];
+          for (let p = 0; p < pieceCount; p++) {
+            const pieceID = readUVarint();
+            titleParts.push(namePieces[pieceID] || '');
+          }
+          const title = titleParts.join(' ');
+          // Read priority.
+          const priority = readUVarint();
+          const sourceDataset = readUVarint();
+          const routeID = readUVarint();
+          // Read coordinate count.
+          const coordCount = readUVarint();
+          const coords = [];
+          let absLon = 0;
+          let absLat = 0;
+          for (let j = 0; j < coordCount; j++) {
+            const deltaLon = readVarintZigZag();
+            const deltaLat = readVarintZigZag();
+            if (j === 0) {
+              absLon = deltaLon;
+              absLat = deltaLat;
+            } else {
+              absLon += deltaLon;
+              absLat += deltaLat;
+            }
+            // Leaflet expects [lat, lon].
+            coords.push([baseLat + absLat / 1000000, baseLon + absLon / 1000000]);
+          }
+          features.push({ stableID, title, priority, coords, sourceDataset, routeID });
         }
         segments.push({ bounds: segBounds, features });
       }
@@ -678,7 +803,17 @@
     // Global storage for segments and rendered segments.
     let allSegments = [];
     let routeTable = [null];
-    let reportActions = { openFromFeature: null };
+    let reportActions = { openFromFeature: null, openCommunityFromIndices: null };
+    const REPORTS_FILTER_STORAGE_KEY = 'communityReportsFilterOnly:v1';
+    const REPORTER_ID_STORAGE_KEY = 'communityReporterId:v1';
+    const REPORTER_SECRET_STORAGE_KEY = 'communityReporterSecret:v1';
+    const API_BASE_ENDPOINT = window.location.hostname === 'localhost'
+      ? 'http://localhost:3001/api/v1'
+      : 'https://api.snowhfx.danp.net/api/v1';
+    const REPORTS_API_ENDPOINT = `${API_BASE_ENDPOINT}/community-reports`;
+    const CURRENT_EVENT_API_ENDPOINT = `${API_BASE_ENDPOINT}/current-event`;
+    let communityReports = [];
+    let showReportsMode = localStorage.getItem(REPORTS_FILTER_STORAGE_KEY) === '1';
     const featuresLayer = L.layerGroup().addTo(map);
     // Track segments that are currently rendered, keyed by segment index.
     const renderedSegments = {};
@@ -738,6 +873,139 @@
       return 'Bikeway/path/street';
     }
 
+    function featureReportKey(mode, segmentIdx, featureIdx) {
+      const segment = allSegments[segmentIdx];
+      const feature = segment && segment.features ? segment.features[featureIdx] : null;
+      if (feature && feature.stableID) {
+        return feature.stableID;
+      }
+      return `${mode}:${segmentIdx}:${featureIdx}`;
+    }
+
+    function createReporterId() {
+      return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
+    function createReporterSecret() {
+      if (!window.crypto || !window.crypto.getRandomValues) {
+        throw new Error('Secure random unavailable');
+      }
+      const bytes = new Uint8Array(32);
+      window.crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      return `rs-${hex}`;
+    }
+
+    function getOrCreateReporterId() {
+      const stored = localStorage.getItem(REPORTER_ID_STORAGE_KEY);
+      if (stored) {
+        return stored;
+      }
+      const id = createReporterId();
+      localStorage.setItem(REPORTER_ID_STORAGE_KEY, id);
+      return id;
+    }
+
+    function getOrCreateReporterSecret() {
+      const stored = localStorage.getItem(REPORTER_SECRET_STORAGE_KEY);
+      if (stored) {
+        return stored;
+      }
+      const secret = createReporterSecret();
+      localStorage.setItem(REPORTER_SECRET_STORAGE_KEY, secret);
+      return secret;
+    }
+
+    function normalizeReportsResponse(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return [];
+      }
+      if (Array.isArray(payload.reports)) {
+        return payload.reports;
+      }
+      if (Array.isArray(payload.rows)) {
+        return payload.rows;
+      }
+      if (payload.reports_by_segment && typeof payload.reports_by_segment === 'object') {
+        return Object.values(payload.reports_by_segment).flat().filter(Boolean);
+      }
+      return [];
+    }
+
+    const reportsApi = {
+      async listReports(filters) {
+        const params = new URLSearchParams();
+        if (filters && filters.dataset_mode) {
+          params.set('dataset_mode', filters.dataset_mode);
+        }
+        const response = await fetch(`${REPORTS_API_ENDPOINT}?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error(`list reports failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        communityReports = normalizeReportsResponse(payload)
+          .filter((report) => report && report.segment_key)
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+        return communityReports;
+      },
+      async createReport(report) {
+        const response = await fetch(REPORTS_API_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(report)
+        });
+        if (!response.ok) {
+          throw new Error(`create report failed: ${response.status}`);
+        }
+        const payload = await response.json();
+        return payload && payload.report ? payload.report : report;
+      }
+    };
+
+    function reportsForFeature(mode, segmentIdx, featureIdx) {
+      const key = featureReportKey(mode, segmentIdx, featureIdx);
+      return communityReports
+        .filter((report) => report.segment_key === key)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    }
+
+    function hasReportForFeature(mode, segmentIdx, featureIdx) {
+      const key = featureReportKey(mode, segmentIdx, featureIdx);
+      return communityReports.some((report) => report.segment_key === key);
+    }
+
+    function summarizeConditions(conditions) {
+      const labels = {
+        snow_covered: 'Snow covered',
+        cleared: 'Cleared',
+        icy: 'Icy',
+        salted: 'Salted',
+        needs_salt: 'Needs salt'
+      };
+      const list = (conditions || []).map((value) => labels[value]).filter(Boolean);
+      return list.length ? list.join(', ') : 'No conditions selected';
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function formatReportAge(isoDate) {
+      const d = new Date(isoDate);
+      const timestamp = d.getTime();
+      if (!Number.isFinite(timestamp)) return 'unknown time';
+      const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60000));
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.round(minutes / 60);
+      if (hours < 72) return `${hours}h ago`;
+      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
     function getPopupContent(segmentIdx, featureIdx) {
       const segment = allSegments[segmentIdx];
       if (!segment) return "Unknown segment";
@@ -749,19 +1017,30 @@
       const sourceLink = datasetExploreUrl(feature.sourceDataset, midpoint);
       const featureLabel = datasetLabel(currentDatasetCode);
       const sourceLabel = datasetLabel(feature.sourceDataset);
-      const showSource = feature.sourceDataset !== currentDatasetCode;
+      const sameSourceAndData = feature.sourceDataset === currentDatasetCode;
+      const sourceLabelHtml = sourceLink
+        ? `<a href="${sourceLink}" target="_blank" rel="noopener">${sourceLabel}</a>`
+        : sourceLabel;
       const routeInfo = routeTable[feature.routeID];
       const routeLabel = routeInfo ? [routeInfo.maint, routeInfo.route].filter(Boolean).join(' / ') : '';
       const showReportButton = isDeadlinePassed(priorityDetails);
+      const recentReports = reportsForFeature(currentDatasetMode, segmentIdx, featureIdx).slice(0, 3);
+      const recentReportsHtml = recentReports.length
+        ? recentReports.map((report) => {
+            const notes = (report.notes || '').trim();
+            const notesHtml = notes ? `<br>&nbsp;&nbsp;Notes: ${escapeHtml(notes)}` : '';
+            return `• ${summarizeConditions(report.conditions)} (${formatReportAge(report.created_at)})${notesHtml}`;
+          }).join('<br>')
+        : 'None yet';
       return `
         ${feature.title || 'Unknown'}<br>
-        <strong>Priority:</strong> ${feature.priority}<br>
-        <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)}<br>
-        <strong>Timeline:</strong> ${priorityDetails.Timeline} hours<br>
-        ${routeLabel ? `<strong>Winter route:</strong> ${routeLabel}<br>` : ''}
-        <strong>Dataset:</strong> ${featureLink ? `<a href="${featureLink}" target="_blank" rel="noopener">${featureLabel}</a>` : featureLabel}
-        ${showSource ? `<br><strong>Priority source:</strong> ${sourceLink ? `<a href="${sourceLink}" target="_blank" rel="noopener">${sourceLabel}</a>` : sourceLabel}` : ''}
-        ${showReportButton ? `<br><button type="button" class="popup-311-button" data-seg="${segmentIdx}" data-feature="${featureIdx}">Report to 311</button>` : ''}
+        <strong>Priority:</strong> ${feature.priority} (${sourceLabelHtml})<br>
+        <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)} (${priorityDetails.Timeline} h)<br>
+        ${routeLabel ? `<strong>Route:</strong> ${routeLabel}<br>` : ''}
+        ${sameSourceAndData ? '' : (featureLink ? `<strong>Data:</strong> <a href="${featureLink}" target="_blank" rel="noopener">${featureLabel}</a><br>` : `<strong>Data:</strong> ${featureLabel}<br>`)}
+        <button type="button" class="popup-community-button" data-seg="${segmentIdx}" data-feature="${featureIdx}">Report conditions</button>
+        ${showReportButton ? `<button type="button" class="popup-311-button" data-seg="${segmentIdx}" data-feature="${featureIdx}">Report to 311</button>` : ''}
+        <div class="popup-report-list"><strong>Recent reports:</strong><br>${recentReportsHtml}</div>
       `;
     }
 
@@ -782,12 +1061,27 @@
           // If this segment isn’t rendered yet, add it.
           if (!(segmentIdx in renderedSegments)) {
             const segmentLayer = L.layerGroup();
-            segment.features.forEach((feature, featureIdx) => {
+            let renderedFeatureCount = 0;
+            const featuresInDrawOrder = segment.features
+              .map((feature, featureIdx) => ({
+                feature,
+                featureIdx,
+                hasReport: hasReportForFeature(currentDatasetMode, segmentIdx, featureIdx)
+              }))
+              // Draw non-reported first so reported lines appear on top.
+              .sort((a, b) => Number(a.hasReport) - Number(b.hasReport));
+            featuresInDrawOrder.forEach(({ feature, featureIdx, hasReport }) => {
               const color = getPriorityColor(feature.priority);
-              const priorityDetails = window.priorities[feature.priority];
-            const polyline = L.polyline(feature.coords, {
+              let weight = lineWeight;
+              let opacity = 0.95;
+              if (showReportsMode && !hasReport) {
+                weight = Math.max(2, lineWeight - 2);
+                opacity = 0.38;
+              }
+              const polyline = L.polyline(feature.coords, {
                 color,
-                weight: lineWeight,
+                weight,
+                opacity,
                 lineCap: 'round',
                 lineJoin: 'round',
                 interactive: true,
@@ -797,9 +1091,12 @@
                    return getPopupContent(segmentIdx, featureIdx);
                  });
               polyline.addTo(segmentLayer);
+              renderedFeatureCount++;
             });
-            segmentLayer.addTo(featuresLayer);
-            renderedSegments[segmentIdx] = segmentLayer;
+            if (renderedFeatureCount > 0) {
+              segmentLayer.addTo(featuresLayer);
+              renderedSegments[segmentIdx] = segmentLayer;
+            }
           }
         } else {
           // If the segment is not visible and is currently rendered, remove it.
@@ -814,12 +1111,16 @@
     /**
      * Load and render segmented features from the binary file.
      */
-    function resetRenderedFeatures() {
+    function clearRenderedFeatures() {
       Object.values(renderedSegments).forEach(layer => featuresLayer.removeLayer(layer));
       for (const key in renderedSegments) {
         delete renderedSegments[key];
       }
       featuresLayer.clearLayers();
+    }
+
+    function resetRenderedFeatures() {
+      clearRenderedFeatures();
       allSegments = [];
     }
 
@@ -858,11 +1159,11 @@
     }
 
     // Load priority/timeline data.
-    fetch('https://hrm.datasette.danp.net/snow/snowhfx.json?_shape=objects')
+    fetch(CURRENT_EVENT_API_ENDPOINT)
       .then(response => response.json())
-      .then(data => {
-        let state = data.rows[0].state;
-        let maxEndTime = data.rows[0].max_end_time;
+      .then(async (data) => {
+        let state = data.state;
+        let maxEndTime = data.max_end_time;
         if (state === "active") {
           maxEndTime = null;
         }
@@ -881,17 +1182,23 @@
         // Update the header with priority details.
         const prioritiesHeader = document.getElementById('priorities-header');
         prioritiesHeader.innerHTML = Object.entries(priorities)
-          .map(([priority, details]) => `
-            <div class="priority-item priority-${priority}">
-              <div class="priority-square">${priority}</div>
-              <div class="priority-deadline">${formatDeadline(details.Deadline)}</div>
-            </div>
-          `)
+          .map(([priority, details]) => {
+            const deadlineParts = formatDeadlineParts(details.Deadline);
+            return `
+              <div class="priority-item priority-${priority}">
+                <div class="priority-square">${priority}</div>
+                <div class="priority-deadline">
+                  <span class="priority-deadline-date">${deadlineParts.date}</span>
+                  ${deadlineParts.time ? `<span class="priority-deadline-time">${deadlineParts.time}</span>` : ''}
+                </div>
+              </div>
+            `;
+          })
           .join('');
         const mobileControls = document.getElementById('mobile-controls');
         const quickButtons = mobileControls.querySelectorAll('button[data-mode]');
-        const gearToggle = document.getElementById('gear-toggle');
         const aboutToggle = document.getElementById('about-toggle');
+        const reportsFilterToggle = document.getElementById('reports-filter-toggle');
         const aboutPanel = document.getElementById('about-panel');
         const aboutClose = document.getElementById('about-close');
         const reportPanel = document.getElementById('report-panel');
@@ -901,17 +1208,40 @@
         const reportEmailLink = document.getElementById('report-email-link');
         const reportCopyBody = document.getElementById('report-copy-body');
         const reportStatusMessage = document.getElementById('report-status-message');
+        const communityReportPanel = document.getElementById('community-report-panel');
+        const communityReportClose = document.getElementById('community-report-close');
+        const communityReportSave = document.getElementById('community-report-save');
+        const communityReportNotes = document.getElementById('community-report-notes');
+        const communityReportFeature = document.getElementById('community-report-feature');
+        const communityReportStatus = document.getElementById('community-report-status');
+        const communityReporterIdLabel = document.getElementById('community-reporter-id');
+        const communityConditionInputs = Array.from(document.querySelectorAll('input[name="community-condition"]'));
         let reportFeature = null;
         let reportStreetText = 'Unnamed segment';
         let reportTravelwayType = 'Travelway';
         let reportRouteText = 'Not matched';
         let reportDatasetUrl = 'Not available';
+        let communityReportContext = null;
         const datasetConfig = {
           sidewalks: { url: 'features.bin', datasetCode: 0 },
           cycling: { url: 'features_cycling.bin', datasetCode: 1 }
         };
         const storedDataset = localStorage.getItem('datasetMode');
         const initialDataset = datasetConfig[storedDataset] ? storedDataset : 'sidewalks';
+        const reporterId = getOrCreateReporterId();
+        const reporterSecret = getOrCreateReporterSecret();
+        communityReporterIdLabel.textContent = `Reporter ID: ${reporterId}`;
+
+        async function refreshCommunityReports() {
+          try {
+            await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+          } catch (error) {
+            console.error('Unable to load community reports', error);
+            communityReports = [];
+          }
+          clearRenderedFeatures();
+          updateVisibleFeatures();
+        }
 
         function updateQuickToggle(mode) {
           quickButtons.forEach(button => {
@@ -927,7 +1257,21 @@
           });
         }
 
-        function loadDataset(mode) {
+        function updateReportsFilterToggle() {
+          reportsFilterToggle.classList.toggle('is-active', showReportsMode);
+          reportsFilterToggle.setAttribute('aria-pressed', showReportsMode ? 'true' : 'false');
+          reportsFilterToggle.textContent = 'Reports';
+        }
+
+        function setReportsMode(enabled) {
+          showReportsMode = enabled;
+          localStorage.setItem(REPORTS_FILTER_STORAGE_KEY, enabled ? '1' : '0');
+          updateReportsFilterToggle();
+          clearRenderedFeatures();
+          updateVisibleFeatures();
+        }
+
+        async function loadDataset(mode) {
           const config = datasetConfig[mode];
           if (!config) {
             console.error("Unknown dataset:", mode);
@@ -940,31 +1284,27 @@
           const fitBounds = !savedState && isInitialLoad;
           const preserveView = !isInitialLoad;
           hasLoadedDataset = true;
-          loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
+          await loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
+          await refreshCommunityReports();
           updateQuickToggle(mode);
         }
 
         quickButtons.forEach(button => {
-          button.addEventListener('click', () => {
+          button.addEventListener('click', async () => {
             const mode = button.dataset.mode;
             localStorage.setItem('datasetMode', mode);
-            loadDataset(mode);
+            await loadDataset(mode);
           });
         });
-        const storedExpanded = localStorage.getItem('mobileExpanded') === '1';
-        if (storedExpanded) {
-          document.body.classList.add('mobile-expanded');
-        }
-        updateQuickLabels();
-        gearToggle.addEventListener('click', () => {
-          document.body.classList.toggle('mobile-expanded');
-          localStorage.setItem('mobileExpanded', document.body.classList.contains('mobile-expanded') ? '1' : '0');
-          updateQuickLabels();
+        reportsFilterToggle.addEventListener('click', () => {
+          setReportsMode(!showReportsMode);
         });
+        updateQuickLabels();
+        updateReportsFilterToggle();
         window.addEventListener('resize', updateQuickLabels);
 
         // Load and render the initial dataset.
-        loadDataset(initialDataset);
+        await loadDataset(initialDataset);
 
         function setAboutOpen(isOpen) {
           aboutPanel.classList.toggle('is-open', isOpen);
@@ -1006,10 +1346,52 @@
           }
         }
 
+        function setCommunityReportOpen(isOpen) {
+          communityReportPanel.classList.toggle('is-open', isOpen);
+          communityReportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+          if (isOpen) {
+            communityReportStatus.textContent = '';
+            communityReportSave.focus();
+          } else {
+            communityReportNotes.value = '';
+            communityReportFeature.textContent = '';
+            communityConditionInputs.forEach((input) => {
+              input.checked = false;
+            });
+            communityReportContext = null;
+          }
+        }
+
+        function setCommunityReportFromFeature(segmentIdx, featureIdx) {
+          const segment = allSegments[segmentIdx];
+          if (!segment || !segment.features || !segment.features[featureIdx]) {
+            return;
+          }
+          const feature = segment.features[featureIdx];
+          const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
+          communityReportContext = {
+            dataset_mode: currentDatasetMode,
+            segment_idx: segmentIdx,
+            feature_idx: featureIdx,
+            segment_key: featureReportKey(currentDatasetMode, segmentIdx, featureIdx),
+            title: feature.title || 'Unnamed segment',
+            priority: feature.priority,
+            route: routeLabel
+          };
+          const modeLabel = communityReportContext.dataset_mode === 'cycling' ? 'cycling' : 'sidewalk';
+          communityReportFeature.textContent = `${communityReportContext.title}, ${modeLabel}`;
+        }
+
         reportClose.addEventListener('click', () => setReportOpen(false));
         reportPanel.addEventListener('click', (event) => {
           if (event.target === reportPanel) {
             setReportOpen(false);
+          }
+        });
+        communityReportClose.addEventListener('click', () => setCommunityReportOpen(false));
+        communityReportPanel.addEventListener('click', (event) => {
+          if (event.target === communityReportPanel) {
+            setCommunityReportOpen(false);
           }
         });
         document.addEventListener('click', (event) => {
@@ -1029,9 +1411,28 @@
           event.preventDefault();
           event.stopPropagation();
         });
+        document.addEventListener('click', (event) => {
+          const button = event.target.closest('.popup-community-button');
+          if (!button) {
+            return;
+          }
+          const segmentIdx = Number(button.dataset.seg);
+          const featureIdx = Number(button.dataset.feature);
+          if (reportActions.openCommunityFromIndices) {
+            reportActions.openCommunityFromIndices(segmentIdx, featureIdx);
+          }
+          event.preventDefault();
+          event.stopPropagation();
+        });
         document.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape' && reportPanel.classList.contains('is-open')) {
+          if (event.key !== 'Escape') {
+            return;
+          }
+          if (reportPanel.classList.contains('is-open')) {
             setReportOpen(false);
+          }
+          if (communityReportPanel.classList.contains('is-open')) {
+            setCommunityReportOpen(false);
           }
         });
         function updateReportEmailDraft() {
@@ -1122,9 +1523,47 @@
             reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
           }
         });
+        communityReportSave.addEventListener('click', async () => {
+          communityReportStatus.textContent = '';
+          if (!communityReportContext) {
+            communityReportStatus.textContent = 'No segment selected.';
+            return;
+          }
+          const conditions = communityConditionInputs
+            .filter((input) => input.checked)
+            .map((input) => input.value);
+          const report = {
+            segment_key: communityReportContext.segment_key,
+            dataset_mode: communityReportContext.dataset_mode,
+            title: communityReportContext.title,
+            priority: communityReportContext.priority,
+            route: communityReportContext.route,
+            conditions,
+            notes: communityReportNotes.value.trim(),
+            reporter_id: reporterId,
+            reporter_secret: reporterSecret
+          };
+          communityReportSave.disabled = true;
+          try {
+            await reportsApi.createReport(report);
+            await refreshCommunityReports();
+            communityReportStatus.textContent = 'Saved.';
+            map.closePopup();
+            setCommunityReportOpen(false);
+          } catch (error) {
+            console.error('Unable to save community report', error);
+            communityReportStatus.textContent = 'Unable to save report right now.';
+          } finally {
+            communityReportSave.disabled = false;
+          }
+        });
         reportActions.openFromFeature = (feature) => {
           setReportFromFeature(feature);
           setReportOpen(true);
+        };
+        reportActions.openCommunityFromIndices = (segmentIdx, featureIdx) => {
+          setCommunityReportFromFeature(segmentIdx, featureIdx);
+          setCommunityReportOpen(true);
         };
       })
       .catch(error => console.error("Error loading priorities:", error));

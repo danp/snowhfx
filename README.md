@@ -33,6 +33,14 @@ The output of that is visible [here](https://hrm.datasette.danp.net/snow), in th
 It scans through all observed changes and builds a log of notable changes to the service update and weather event end times.
 From those it derives states.
 
+`cmd/api` runs an API server against that same database and serves event data plus community condition reports:
+
+* `GET /api/v1/current-event`
+* `GET /api/v1/community-reports?dataset_mode=...`
+* `POST /api/v1/community-reports`
+
+Reports auto-expire after 3 days, and all active reports are expired when a new weather event id is observed.
+
 `index.html` loads `features.bin` and `features_cycling.bin` for lines to show on the map (sidewalk and cycling modes) and queries [this condensed events data](https://hrm.datasette.danp.net/snow/snowhfx) for the current weather event state and last weather event end time.
 
 The site runs on GitHub Pages.

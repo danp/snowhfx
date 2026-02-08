@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/danp/snowhfx/internal/featuresbin"
+	"github.com/paulmach/orb"
 )
 
 type geojsonFeatureCollection struct {
@@ -101,6 +103,57 @@ func addBaselineBikeAndIce(bike, ice geojsonFeatureCollection) (geojsonFeatureCo
 		},
 	})
 	return bike, ice
+}
+
+func TestEncodeFeaturesNameTableDeduplicatesTitles(t *testing.T) {
+	features := []lineFeature{
+		{
+			stableID:      "abc123xyz",
+			title:         "Shared Name",
+			priority:      1,
+			sourceDataset: datasetTravelways,
+			coords:        orb.LineString{{0, 0}, {0.001, 0}},
+		},
+		{
+			stableID:      "abc456xyz",
+			title:         "Shared Name",
+			priority:      2,
+			sourceDataset: datasetTravelways,
+			coords:        orb.LineString{{0, 0.001}, {0.001, 0.001}},
+		},
+		{
+			stableID:      "abc789xyz",
+			title:         "Unique Name",
+			priority:      3,
+			sourceDataset: datasetTravelways,
+			coords:        orb.LineString{{0, 0.002}, {0.001, 0.002}},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := encodeFeatures(features, &out); err != nil {
+		t.Fatalf("encode features: %v", err)
+	}
+
+	decoded, _, header, err := featuresbin.Read(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatalf("decode features: %v", err)
+	}
+	if header.FormatVersion != featuresBinVersion {
+		t.Fatalf("format version: got %d want %d", header.FormatVersion, featuresBinVersion)
+	}
+	if header.NamePieceCount != 8 {
+		t.Fatalf("name piece count: got %d want %d", header.NamePieceCount, 8)
+	}
+	if len(decoded) != 3 {
+		t.Fatalf("decoded feature count: got %d want %d", len(decoded), 3)
+	}
+	if decoded[0].StableID != "abc123xyz" || decoded[1].StableID != "abc456xyz" || decoded[2].StableID != "abc789xyz" {
+		t.Fatalf("decoded stable ids mismatch: %+v", []string{decoded[0].StableID, decoded[1].StableID, decoded[2].StableID})
+	}
+	if decoded[0].Title != "Shared Name" || decoded[1].Title != "Shared Name" || decoded[2].Title != "Unique Name" {
+		t.Fatalf("decoded titles mismatch: %+v", []string{decoded[0].Title, decoded[1].Title, decoded[2].Title})
+	}
 }
 
 func runWithGeoJSON(t *testing.T, travelways, bike, ice geojsonFeatureCollection) (string, string) {
@@ -614,6 +667,98 @@ func TestBikeFeaturesBin(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBikePrefersExplicitWinterPriority(t *testing.T) {
+	travelways := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  1,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI1",
+					"OWNER":     "HRM",
+					"LOCATION":  "Devonshire Ave",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}},
+				},
+			},
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":  2,
+					"WINT_PLOW": "Y",
+					"WINT_LOS":  "PRI3",
+					"OWNER":     "HRM",
+					"LOCATION":  "Devonshire Ave",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0.001, 0}, {0.002, 0}},
+				},
+			},
+		},
+	}
+	bike := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"OBJECTID":   709,
+					"BIKEFACID":  "BIKEFAC6122",
+					"WINT_PLOW":  "Y",
+					"WINT_LOS":   "PRI1",
+					"WINT_MAINT": "W2",
+					"WINT_ROUTE": "BLR",
+					"BIKETYPE":   "PROTBL",
+					"PROT_TYPE":  "BOLLARD",
+					"BIKE_NAME":  "Devonshire Protected Bike Lanes",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{0, 0}, {0.001, 0}, {0.002, 0}},
+				},
+			},
+		},
+	}
+	ice := geojsonFeatureCollection{
+		Type: "FeatureCollection",
+		Features: []geojsonFeature{
+			{
+				Type: "Feature",
+				Properties: map[string]interface{}{
+					"PRIORITY": "1",
+				},
+				Geometry: geojsonGeometry{
+					Type:        "LineString",
+					Coordinates: [][]float64{{10, 10}, {10.001, 10}},
+				},
+			},
+		},
+	}
+
+	_, bikeOut := runWithGeoJSON(t, travelways, bike, ice)
+	features := readFeaturesBin(t, bikeOut)
+	var target []decodedFeature
+	for _, feat := range features {
+		if feat.title == "Devonshire Protected Bike Lanes" {
+			target = append(target, feat)
+		}
+	}
+	if len(target) != 1 {
+		t.Fatalf("expected exactly 1 feature for explicit-priority bike route, got %d", len(target))
+	}
+	if target[0].priority != 1 {
+		t.Fatalf("expected explicit bike priority 1, got %d", target[0].priority)
+	}
+	if target[0].sourceDataset != datasetBike {
+		t.Fatalf("expected source dataset bike (%d), got %d", datasetBike, target[0].sourceDataset)
 	}
 }
 

@@ -161,6 +161,8 @@ Ice route constraints
 
 Active Travelways (expected fields used in current code)
 - `OBJECTID` (int)
+- `ASSETID` (string; looks stable across refreshes and better for external IDs)
+- `TR_ID` (string; similar stability profile to `ASSETID`)
 - `WINT_PLOW` (Y/N)
 - `WINT_LOS` (domain includes PRI1/PRI2/PRI3/PRI1TRAN/TRAN/TRANRESD; local file only has PRI1/PRI2/PRI3)
 - `WINT_MAINT` (zone; see domain)
@@ -170,6 +172,7 @@ Active Travelways (expected fields used in current code)
 
 Bike Infrastructure (expected fields used in current code)
 - `OBJECTID`
+- `BIKEFACID` (string; looks stable across refreshes and better for external IDs)
 - `BIKETYPE`
 - `PROT_TYPE`
 - `BIKE_NAME`
@@ -181,6 +184,28 @@ Ice Routes (expected fields used in current code)
 - `PRIORITY` (1/2 per metadata)
 - `ROUTE_NAME`
 - `OPERATOR` (present in data, not explicitly mentioned in PDF)
+
+### 6.1) Identifier stability across refreshes (`data/` vs `data2/`)
+
+Quick comparison of two separate downloads (`data/*.geojson` and `data2/*.geojson`) shows:
+
+- `OBJECTID`: poor external stability signal. IDs overlap heavily by value, but many values refer to different rows between downloads.
+  - Travelways: 49,637 shared `OBJECTID` values, but ~45,776 map to different `ASSETID` rows.
+  - Bike: 935 shared `OBJECTID` values, but ~904 map to different `BIKEFACID` rows.
+- `GLOBALID`: not stable in these exports (0 overlap between snapshots for travelways and bike).
+- `ASSETID` (travelways): strong stability signal.
+  - 49,635 kept, 31 added, 18 removed across the two snapshots.
+  - Unique/non-null in both snapshots.
+- `TR_ID` (travelways): similar profile to `ASSETID` in this comparison.
+- `BIKEFACID` (bike): strong stability signal.
+  - 934 kept, 15 added, 1 removed.
+  - Unique/non-null in both snapshots.
+
+Practical recommendation for report/API identifiers:
+- Travelways: use `ASSETID` (or `TR_ID`) instead of `OBJECTID`.
+- Bike: use `BIKEFACID` instead of `OBJECTID`.
+- Avoid `GLOBALID` for cross-refresh identity with current export path.
+- For split bike runs, append a deterministic run suffix (e.g., run index or geometry hash) when a single source feature becomes multiple rendered segments.
 
 ---
 

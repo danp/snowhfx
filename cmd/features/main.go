@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"math"
@@ -29,6 +30,9 @@ const (
 
 	defaultTravelwaysOut = "features.bin"
 	defaultBikeOut       = "features_cycling.bin"
+
+	featuresBinMagic   = "SHFX"
+	featuresBinVersion = uint8(4)
 )
 
 const (
@@ -151,6 +155,7 @@ func run(ctx context.Context, cfg runConfig) error {
 }
 
 type lineFeature struct {
+	stableID      string
 	title         string
 	priority      uint8
 	coords        orb.LineString
@@ -164,6 +169,8 @@ type lineFeature struct {
 type debugEntry struct {
 	Dataset        string         `json:"dataset"`
 	ObjectID       int            `json:"object_id"`
+	SourceStableID string         `json:"source_stable_id,omitempty"`
+	RunStableIDs   []string       `json:"run_stable_ids,omitempty"`
 	Title          string         `json:"title,omitempty"`
 	Included       bool           `json:"included"`
 	Reason         string         `json:"reason"`
@@ -246,6 +253,80 @@ func datasetName(code uint8) string {
 	}
 }
 
+func travelwayStableID(props geojson.Properties, objectID int) string {
+	if id := strings.TrimSpace(props.MustString("ASSETID", "")); id != "" {
+		return id
+	}
+	if id := strings.TrimSpace(props.MustString("TR_ID", "")); id != "" {
+		return id
+	}
+	if objectID != 0 {
+		return fmt.Sprintf("objectid:%d", objectID)
+	}
+	return ""
+}
+
+func bikeStableID(props geojson.Properties, objectID int) string {
+	if id := strings.TrimSpace(props.MustString("BIKEFACID", "")); id != "" {
+		return id
+	}
+	if objectID != 0 {
+		return fmt.Sprintf("objectid:%d", objectID)
+	}
+	return ""
+}
+
+func runStableSuffix(run lineRun) string {
+	h := fnv.New64a()
+	for _, coord := range run.coords {
+		lon := int32(math.Round(coord[0] * 1_000_000))
+		lat := int32(math.Round(coord[1] * 1_000_000))
+		_ = binary.Write(h, binary.LittleEndian, lon)
+		_ = binary.Write(h, binary.LittleEndian, lat)
+	}
+	_ = binary.Write(h, binary.LittleEndian, run.priority)
+	_ = binary.Write(h, binary.LittleEndian, run.sourceDataset)
+	_ = binary.Write(h, binary.LittleEndian, int32(run.startSegment))
+	_ = binary.Write(h, binary.LittleEndian, int32(run.endSegment))
+	return fmt.Sprintf("%x", h.Sum64())[:10]
+}
+
+func splitFixedChunks(value string, chunkSize int) []string {
+	if value == "" || chunkSize <= 0 {
+		return nil
+	}
+	out := make([]string, 0, (len(value)+chunkSize-1)/chunkSize)
+	for i := 0; i < len(value); i += chunkSize {
+		end := i + chunkSize
+		if end > len(value) {
+			end = len(value)
+		}
+		out = append(out, value[i:end])
+	}
+	return out
+}
+
+func ensureFieldPieces(value string, pieceEntries *[]string, pieceIndex map[string]uint16) ([]uint16, error) {
+	if value == "" {
+		return nil, nil
+	}
+	fields := strings.Fields(value)
+	ids := make([]uint16, 0, len(fields))
+	for _, field := range fields {
+		id, ok := pieceIndex[field]
+		if !ok {
+			if len(*pieceEntries) >= math.MaxUint16 {
+				return nil, fmt.Errorf("too many string pieces: %d exceeds uint16 capacity", len(*pieceEntries)+1)
+			}
+			*pieceEntries = append(*pieceEntries, field)
+			id = uint16(len(*pieceEntries))
+			pieceIndex[field] = id
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debug *[]debugEntry) ([]lineFeature, error) {
 	features := make([]lineFeature, 0, len(fc.Features))
 	skippedNoPlow := 0
@@ -258,28 +339,31 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
 		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
 		owner := strings.TrimSpace(props.MustString("OWNER", ""))
+		stableID := travelwayStableID(props, objectID)
 		if isPrivateOwner(owner) {
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    props.MustString("LOCATION", ""),
-				Included: false,
-				Reason:   "OWNER=PRIV",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          props.MustString("LOCATION", ""),
+				Included:       false,
+				Reason:         "OWNER=PRIV",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			continue
 		}
 		if isNotPlowed(props) {
 			skippedNoPlow++
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    props.MustString("LOCATION", ""),
-				Included: false,
-				Reason:   "WINT_PLOW=N",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          props.MustString("LOCATION", ""),
+				Included:       false,
+				Reason:         "WINT_PLOW=N",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			continue
 		}
@@ -287,13 +371,14 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 		priority, ok := priorityFromWintLOS(wintLOS)
 		if !ok {
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    location,
-				Included: false,
-				Reason:   "missing or invalid WINT_LOS",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          location,
+				Included:       false,
+				Reason:         "missing or invalid WINT_LOS",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			continue
 		}
@@ -301,38 +386,41 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 		ls, ok, err := flattenLineString(f.Geometry)
 		if err != nil {
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    props.MustString("LOCATION", ""),
-				Included: false,
-				Reason:   "invalid geometry",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          props.MustString("LOCATION", ""),
+				Included:       false,
+				Reason:         "invalid geometry",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			return nil, err
 		}
 		if !ok {
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    props.MustString("LOCATION", ""),
-				Included: false,
-				Reason:   "empty geometry",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          props.MustString("LOCATION", ""),
+				Included:       false,
+				Reason:         "empty geometry",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			continue
 		}
 
 		if location == "" {
 			appendDebug(debug, debugEntry{
-				Dataset:  "travelways",
-				ObjectID: objectID,
-				Title:    "",
-				Included: false,
-				Reason:   "missing LOCATION",
-				WintPlow: wintPlow,
-				WintLOS:  wintLOS,
+				Dataset:        "travelways",
+				ObjectID:       objectID,
+				SourceStableID: stableID,
+				Title:          "",
+				Included:       false,
+				Reason:         "missing LOCATION",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
 			})
 			continue
 		}
@@ -341,6 +429,7 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 			title = titles.normalize("Nora Bernard St")
 		}
 		features = append(features, lineFeature{
+			stableID:      stableID,
 			title:         title,
 			priority:      priority,
 			coords:        ls,
@@ -350,15 +439,17 @@ func travelwayLines(fc *geojson.FeatureCollection, titles *titleNormalizer, debu
 			wintRoute:     wintRoute,
 		})
 		appendDebug(debug, debugEntry{
-			Dataset:  "travelways",
-			ObjectID: objectID,
-			Title:    title,
-			Included: true,
-			Reason:   "included",
-			Priority: priority,
-			WintPlow: wintPlow,
-			WintLOS:  wintLOS,
-			Coords:   ls,
+			Dataset:        "travelways",
+			ObjectID:       objectID,
+			SourceStableID: stableID,
+			RunStableIDs:   []string{stableID},
+			Title:          title,
+			Included:       true,
+			Reason:         "included",
+			Priority:       priority,
+			WintPlow:       wintPlow,
+			WintLOS:        wintLOS,
+			Coords:         ls,
 		})
 	}
 
@@ -540,6 +631,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 	var (
 		matchedTravelways int
 		matchedIce        int
+		matchedBike       int
 		matchedFallback   int
 		skipped           int
 		skippedNotPlowed  int
@@ -554,20 +646,22 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		wintPlow := strings.TrimSpace(props.MustString("WINT_PLOW", ""))
 		wintLOS := strings.TrimSpace(props.MustString("WINT_LOS", ""))
 		bikeType := strings.TrimSpace(props.MustString("BIKETYPE", ""))
+		baseStableID := bikeStableID(props, objectID)
 		if isNotPlowed(props) {
 			skippedNotPlowed++
 			appendDebug(debug, debugEntry{
-				Dataset:    "bike",
-				ObjectID:   objectID,
-				Title:      props.MustString("BIKE_NAME", ""),
-				Included:   false,
-				Reason:     "WINT_PLOW=N",
-				WintPlow:   wintPlow,
-				WintLOS:    wintLOS,
-				BikeType:   bikeType,
-				ProtType:   props.MustString("PROT_TYPE", ""),
-				BikeName:   props.MustString("BIKE_NAME", ""),
-				StreetName: props.MustString("STREETNAME", ""),
+				Dataset:        "bike",
+				ObjectID:       objectID,
+				SourceStableID: baseStableID,
+				Title:          props.MustString("BIKE_NAME", ""),
+				Included:       false,
+				Reason:         "WINT_PLOW=N",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
+				BikeType:       bikeType,
+				ProtType:       props.MustString("PROT_TYPE", ""),
+				BikeName:       props.MustString("BIKE_NAME", ""),
+				StreetName:     props.MustString("STREETNAME", ""),
 			})
 			continue
 		}
@@ -578,17 +672,18 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		}
 		if len(lines) == 0 {
 			appendDebug(debug, debugEntry{
-				Dataset:    "bike",
-				ObjectID:   objectID,
-				Title:      props.MustString("BIKE_NAME", ""),
-				Included:   false,
-				Reason:     "empty geometry",
-				WintPlow:   wintPlow,
-				WintLOS:    wintLOS,
-				BikeType:   bikeType,
-				ProtType:   props.MustString("PROT_TYPE", ""),
-				BikeName:   props.MustString("BIKE_NAME", ""),
-				StreetName: props.MustString("STREETNAME", ""),
+				Dataset:        "bike",
+				ObjectID:       objectID,
+				SourceStableID: baseStableID,
+				Title:          props.MustString("BIKE_NAME", ""),
+				Included:       false,
+				Reason:         "empty geometry",
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
+				BikeType:       bikeType,
+				ProtType:       props.MustString("PROT_TYPE", ""),
+				BikeName:       props.MustString("BIKE_NAME", ""),
+				StreetName:     props.MustString("STREETNAME", ""),
 			})
 			continue
 		}
@@ -596,6 +691,7 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 		baseTitle, baseTitleFromType := bikeTitle(props, titles)
 		wintMaint := strings.TrimSpace(props.MustString("WINT_MAINT", ""))
 		wintRoute := strings.TrimSpace(props.MustString("WINT_ROUTE", ""))
+		preferredBikePriority, hasPreferredBikePriority := preferredBikePriority(wintPlow, wintLOS, wintMaint, wintRoute)
 
 		isHelpConn := strings.EqualFold(bikeType, "HELPCONN")
 		isProtected := isProtectedBike(props)
@@ -613,53 +709,64 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 				reason        string
 			)
 
-			if isHelpConn {
-				attr = overlapAttributionPrefer(ls, iceIndex, datasetIce, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
-				if attr.totalLength > 0 {
-					sourceDataset = datasetIce
-					reason = "overlap-first ice with travelways fallback"
-					found = true
-					matchedIce++
+			if hasPreferredBikePriority {
+				length := lineLengthMeters(ls, projectorForLine(ls))
+				attr = overlapAttributionResult{
+					byPriority: map[uint8]float64{preferredBikePriority: length},
 				}
-			} else if isProtected {
-				if isOffstreetFallback {
-					attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
-					if attr.totalLength > 0 {
-						sourceDataset = datasetTravelways
-						reason = "overlap-first travelways with ice fallback"
-						found = true
-						matchedTravelways++
-					}
-				} else {
-					attr = overlapAttribution(ls, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
-					if attr.totalLength > 0 {
-						sourceDataset = datasetTravelways
-						reason = "overlap-first travelways"
-						found = true
-						matchedTravelways++
-					}
-				}
+				sourceDataset = datasetBike
+				reason = "prefer bike WINT_LOS+route"
+				found = true
+				matchedBike++
 			} else {
-				if isOffstreetFallback {
-					attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
-					if attr.totalLength > 0 {
-						sourceDataset = datasetTravelways
-						reason = "overlap-first travelways with ice fallback"
-						found = true
-					}
-				} else {
-					attr = overlapAttribution(ls, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+				if isHelpConn {
+					attr = overlapAttributionPrefer(ls, iceIndex, datasetIce, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
 					if attr.totalLength > 0 {
 						sourceDataset = datasetIce
-						reason = "overlap-first ice"
+						reason = "overlap-first ice with travelways fallback"
 						found = true
-					}
-				}
-				if attr.totalLength > 0 {
-					if sourceDataset == datasetTravelways {
-						matchedTravelways++
-					} else if sourceDataset == datasetIce {
 						matchedIce++
+					}
+				} else if isProtected {
+					if isOffstreetFallback {
+						attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+						if attr.totalLength > 0 {
+							sourceDataset = datasetTravelways
+							reason = "overlap-first travelways with ice fallback"
+							found = true
+							matchedTravelways++
+						}
+					} else {
+						attr = overlapAttribution(ls, travelwaysIndex, datasetTravelways, maxMatchMeters, maxAngleRad)
+						if attr.totalLength > 0 {
+							sourceDataset = datasetTravelways
+							reason = "overlap-first travelways"
+							found = true
+							matchedTravelways++
+						}
+					}
+				} else {
+					if isOffstreetFallback {
+						attr = overlapAttributionPrefer(ls, travelwaysIndex, datasetTravelways, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+						if attr.totalLength > 0 {
+							sourceDataset = datasetTravelways
+							reason = "overlap-first travelways with ice fallback"
+							found = true
+						}
+					} else {
+						attr = overlapAttribution(ls, iceIndex, datasetIce, maxMatchMeters, maxAngleRad)
+						if attr.totalLength > 0 {
+							sourceDataset = datasetIce
+							reason = "overlap-first ice"
+							found = true
+						}
+					}
+					if attr.totalLength > 0 {
+						if sourceDataset == datasetTravelways {
+							matchedTravelways++
+						} else if sourceDataset == datasetIce {
+							matchedIce++
+						}
 					}
 				}
 			}
@@ -667,18 +774,19 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			if title == "" {
 				skippedNoName++
 				appendDebug(debug, debugEntry{
-					Dataset:    "bike",
-					ObjectID:   objectID,
-					Title:      "",
-					Included:   false,
-					Reason:     "missing name",
-					WintPlow:   wintPlow,
-					WintLOS:    wintLOS,
-					BikeType:   bikeType,
-					ProtType:   props.MustString("PROT_TYPE", ""),
-					BikeName:   props.MustString("BIKE_NAME", ""),
-					StreetName: props.MustString("STREETNAME", ""),
-					Coords:     ls,
+					Dataset:        "bike",
+					ObjectID:       objectID,
+					SourceStableID: baseStableID,
+					Title:          "",
+					Included:       false,
+					Reason:         "missing name",
+					WintPlow:       wintPlow,
+					WintLOS:        wintLOS,
+					BikeType:       bikeType,
+					ProtType:       props.MustString("PROT_TYPE", ""),
+					BikeName:       props.MustString("BIKE_NAME", ""),
+					StreetName:     props.MustString("STREETNAME", ""),
+					Coords:         ls,
 				})
 				continue
 			}
@@ -699,25 +807,26 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			if !found {
 				skipped++
 				appendDebug(debug, debugEntry{
-					Dataset:       "bike",
-					ObjectID:      objectID,
-					Title:         title,
-					Included:      false,
-					Reason:        "no match",
-					WintPlow:      wintPlow,
-					WintLOS:       wintLOS,
-					BikeType:      bikeType,
-					ProtType:      props.MustString("PROT_TYPE", ""),
-					BikeName:      props.MustString("BIKE_NAME", ""),
-					StreetName:    props.MustString("STREETNAME", ""),
-					ProtectedBike: isProtected,
-					Coords:        ls,
+					Dataset:        "bike",
+					ObjectID:       objectID,
+					SourceStableID: baseStableID,
+					Title:          title,
+					Included:       false,
+					Reason:         "no match",
+					WintPlow:       wintPlow,
+					WintLOS:        wintLOS,
+					BikeType:       bikeType,
+					ProtType:       props.MustString("PROT_TYPE", ""),
+					BikeName:       props.MustString("BIKE_NAME", ""),
+					StreetName:     props.MustString("STREETNAME", ""),
+					ProtectedBike:  isProtected,
+					Coords:         ls,
 				})
 				continue
 			}
 
 			var runs []lineRun
-			if sourceDataset == datasetBike && reason == "fallback WINT_LOS" {
+			if sourceDataset == datasetBike {
 				runs = []lineRun{
 					{
 						priority:      dominantPriority(attr.byPriority),
@@ -732,23 +841,25 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 			if len(runs) == 0 {
 				skipped++
 				appendDebug(debug, debugEntry{
-					Dataset:       "bike",
-					ObjectID:      objectID,
-					Title:         title,
-					Included:      false,
-					Reason:        "no overlap runs",
-					WintPlow:      wintPlow,
-					WintLOS:       wintLOS,
-					BikeType:      bikeType,
-					ProtType:      props.MustString("PROT_TYPE", ""),
-					BikeName:      props.MustString("BIKE_NAME", ""),
-					StreetName:    props.MustString("STREETNAME", ""),
-					ProtectedBike: isProtected,
-					Coords:        ls,
+					Dataset:        "bike",
+					ObjectID:       objectID,
+					SourceStableID: baseStableID,
+					Title:          title,
+					Included:       false,
+					Reason:         "no overlap runs",
+					WintPlow:       wintPlow,
+					WintLOS:        wintLOS,
+					BikeType:       bikeType,
+					ProtType:       props.MustString("PROT_TYPE", ""),
+					BikeName:       props.MustString("BIKE_NAME", ""),
+					StreetName:     props.MustString("STREETNAME", ""),
+					ProtectedBike:  isProtected,
+					Coords:         ls,
 				})
 				continue
 			}
 
+			runStableIDs := make([]string, 0, len(runs))
 			for _, run := range runs {
 				runTitle := title
 				if (runTitle == "" || titleFromType) && nameTravelwaysIndex != nil {
@@ -777,37 +888,46 @@ func bikeLines(fc *geojson.FeatureCollection, titles *titleNormalizer, travelway
 						}
 					}
 				}
+				runStableID := baseStableID
+				if runStableID != "" {
+					runStableID = runStableID + ":" + runStableSuffix(run)
+				}
+				runStableIDs = append(runStableIDs, runStableID)
 				features = append(features, lineFeature{
+					stableID:      runStableID,
 					title:         runTitle,
 					priority:      run.priority,
 					coords:        run.coords,
 					sourceDataset: run.sourceDataset,
+					objectID:      objectID,
 					wintMaint:     runWintMaint,
 					wintRoute:     runWintRoute,
 				})
 			}
 
 			appendDebug(debug, debugEntry{
-				Dataset:       "bike",
-				ObjectID:      objectID,
-				Title:         title,
-				Included:      true,
-				Reason:        reason,
-				Priority:      dominantPriority(attr.byPriority),
-				WintPlow:      wintPlow,
-				WintLOS:       wintLOS,
-				BikeType:      bikeType,
-				ProtType:      props.MustString("PROT_TYPE", ""),
-				BikeName:      props.MustString("BIKE_NAME", ""),
-				StreetName:    props.MustString("STREETNAME", ""),
-				ProtectedBike: isProtected,
-				SourceDataset: datasetName(sourceDataset),
-				Coords:        ls,
+				Dataset:        "bike",
+				ObjectID:       objectID,
+				SourceStableID: baseStableID,
+				RunStableIDs:   runStableIDs,
+				Title:          title,
+				Included:       true,
+				Reason:         reason,
+				Priority:       dominantPriority(attr.byPriority),
+				WintPlow:       wintPlow,
+				WintLOS:        wintLOS,
+				BikeType:       bikeType,
+				ProtType:       props.MustString("PROT_TYPE", ""),
+				BikeName:       props.MustString("BIKE_NAME", ""),
+				StreetName:     props.MustString("STREETNAME", ""),
+				ProtectedBike:  isProtected,
+				SourceDataset:  datasetName(sourceDataset),
+				Coords:         ls,
 			})
 		}
 	}
 
-	log.Printf("bike lines matched travelways=%d ice=%d fallback=%d skipped=%d", matchedTravelways, matchedIce, matchedFallback, skipped)
+	log.Printf("bike lines matched travelways=%d ice=%d bike=%d fallback=%d skipped=%d", matchedTravelways, matchedIce, matchedBike, matchedFallback, skipped)
 	if skippedNotPlowed > 0 {
 		log.Printf("bike lines skipped not plowed=%d", skippedNotPlowed)
 	}
@@ -850,6 +970,16 @@ func priorityFromWintLOS(value string) (uint8, bool) {
 		return 0, false
 	}
 	return uint8(priority), true
+}
+
+func preferredBikePriority(wintPlow, wintLOS, wintMaint, wintRoute string) (uint8, bool) {
+	if !strings.EqualFold(strings.TrimSpace(wintPlow), "Y") {
+		return 0, false
+	}
+	if strings.TrimSpace(wintMaint) == "" && strings.TrimSpace(wintRoute) == "" {
+		return 0, false
+	}
+	return priorityFromWintLOS(wintLOS)
 }
 
 func iceRouteLines(fc *geojson.FeatureCollection) ([]indexedLine, error) {
@@ -909,6 +1039,8 @@ func iceRouteMap(fc *geojson.FeatureCollection) map[int]routeInfo {
 func flattenLineString(geom orb.Geometry) (orb.LineString, bool, error) {
 	var ls orb.LineString
 	switch g := geom.(type) {
+	case nil:
+		return nil, false, nil
 	case orb.LineString:
 		ls = g
 	case orb.MultiLineString:
@@ -926,6 +1058,8 @@ func flattenLineString(geom orb.Geometry) (orb.LineString, bool, error) {
 
 func lineStringsFromGeometry(geom orb.Geometry) ([]orb.LineString, error) {
 	switch g := geom.(type) {
+	case nil:
+		return nil, nil
 	case orb.LineString:
 		if len(g) == 0 {
 			return nil, nil
@@ -945,6 +1079,21 @@ func lineStringsFromGeometry(geom orb.Geometry) ([]orb.LineString, error) {
 	}
 }
 
+func writeUvarint(w io.Writer, value uint64) error {
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], value)
+	_, err := w.Write(buf[:n])
+	return err
+}
+
+func encodeZigZag(value int64) uint64 {
+	return uint64(uint64(value<<1) ^ uint64(value>>63))
+}
+
+func writeVarintZigZag(w io.Writer, value int64) error {
+	return writeUvarint(w, encodeZigZag(value))
+}
+
 func encodeFeatures(features []lineFeature, writer io.Writer) error {
 	if len(features) == 0 {
 		return fmt.Errorf("no features")
@@ -960,6 +1109,12 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 	var featuresForSeg []featureForSeg
 	routeEntries := make([]routeInfo, 0)
 	routeIndex := make(map[routeInfo]uint16)
+	pieceEntries := make([]string, 0)
+	pieceIndex := make(map[string]uint16)
+	stablePieceIDs := make(map[string][]uint16)
+	titlePieceIDs := make(map[string][]uint16)
+	routeMaintPieceIDs := make(map[string][]uint16)
+	routeNamePieceIDs := make(map[string][]uint16)
 
 	for _, feature := range features {
 		ls := feature.coords
@@ -994,9 +1149,52 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 				routeEntries = append(routeEntries, key)
 				routeID = uint16(len(routeEntries))
 				routeIndex[key] = routeID
+				if _, ok := routeMaintPieceIDs[key.maint]; !ok {
+					ids, err := ensureFieldPieces(key.maint, &pieceEntries, pieceIndex)
+					if err != nil {
+						return err
+					}
+					routeMaintPieceIDs[key.maint] = ids
+				}
+				if _, ok := routeNamePieceIDs[key.route]; !ok {
+					ids, err := ensureFieldPieces(key.route, &pieceEntries, pieceIndex)
+					if err != nil {
+						return err
+					}
+					routeNamePieceIDs[key.route] = ids
+				}
 			}
 		}
 		feature.routeID = routeID
+
+		if feature.stableID != "" {
+			if _, ok := stablePieceIDs[feature.stableID]; !ok {
+				chunks := splitFixedChunks(feature.stableID, 3)
+				ids := make([]uint16, 0, len(chunks))
+				for _, chunk := range chunks {
+					id, ok := pieceIndex[chunk]
+					if !ok {
+						if len(pieceEntries) >= math.MaxUint16 {
+							return fmt.Errorf("too many string pieces: %d exceeds uint16 capacity", len(pieceEntries)+1)
+						}
+						pieceEntries = append(pieceEntries, chunk)
+						id = uint16(len(pieceEntries))
+						pieceIndex[chunk] = id
+					}
+					ids = append(ids, id)
+				}
+				stablePieceIDs[feature.stableID] = ids
+			}
+		}
+		if feature.title != "" {
+			if _, ok := titlePieceIDs[feature.title]; !ok {
+				ids, err := ensureFieldPieces(feature.title, &pieceEntries, pieceIndex)
+				if err != nil {
+					return err
+				}
+				titlePieceIDs[feature.title] = ids
+			}
+		}
 		repLon, repLat := ls[0][0], ls[0][1]
 		featuresForSeg = append(featuresForSeg, featureForSeg{
 			data:   feature,
@@ -1061,7 +1259,13 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 		}
 	}
 
-	if err := binary.Write(writer, binary.LittleEndian, uint32(len(segments))); err != nil {
+	if _, err := writer.Write([]byte(featuresBinMagic)); err != nil {
+		return err
+	}
+	if err := binary.Write(writer, binary.LittleEndian, featuresBinVersion); err != nil {
+		return err
+	}
+	if err := writeUvarint(writer, uint64(len(segments))); err != nil {
 		return err
 	}
 	if err := binary.Write(writer, binary.LittleEndian, globalMinLon); err != nil {
@@ -1070,29 +1274,42 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 	if err := binary.Write(writer, binary.LittleEndian, globalMinLat); err != nil {
 		return err
 	}
-	if err := binary.Write(writer, binary.LittleEndian, uint16(len(routeEntries))); err != nil {
+	if err := writeUvarint(writer, uint64(len(routeEntries))); err != nil {
 		return err
 	}
+	if err := writeUvarint(writer, uint64(len(pieceEntries))); err != nil {
+		return err
+	}
+	for _, piece := range pieceEntries {
+		pieceBytes := []byte(piece)
+		if len(pieceBytes) > 255 {
+			return fmt.Errorf("title piece too long: %q exceeds 255 bytes", piece)
+		}
+		if err := writeUvarint(writer, uint64(len(pieceBytes))); err != nil {
+			return err
+		}
+		if _, err := writer.Write(pieceBytes); err != nil {
+			return err
+		}
+	}
 	for _, entry := range routeEntries {
-		maintBytes := []byte(entry.maint)
-		if len(maintBytes) > 255 {
-			return fmt.Errorf("WINT_MAINT too long: %q exceeds 255 bytes", entry.maint)
-		}
-		routeBytes := []byte(entry.route)
-		if len(routeBytes) > 255 {
-			return fmt.Errorf("WINT_ROUTE too long: %q exceeds 255 bytes", entry.route)
-		}
-		if err := binary.Write(writer, binary.LittleEndian, uint8(len(maintBytes))); err != nil {
+		maintIDs := routeMaintPieceIDs[entry.maint]
+		routeIDs := routeNamePieceIDs[entry.route]
+		if err := writeUvarint(writer, uint64(len(maintIDs))); err != nil {
 			return err
 		}
-		if _, err := writer.Write(maintBytes); err != nil {
+		for _, id := range maintIDs {
+			if err := writeUvarint(writer, uint64(id)); err != nil {
+				return err
+			}
+		}
+		if err := writeUvarint(writer, uint64(len(routeIDs))); err != nil {
 			return err
 		}
-		if err := binary.Write(writer, binary.LittleEndian, uint8(len(routeBytes))); err != nil {
-			return err
-		}
-		if _, err := writer.Write(routeBytes); err != nil {
-			return err
+		for _, id := range routeIDs {
+			if err := writeUvarint(writer, uint64(id)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1120,60 +1337,97 @@ func encodeFeatures(features []lineFeature, writer io.Writer) error {
 		deltaMinLat := int32(math.Round((segMinLat - globalMinLat) * 1000000))
 		deltaMaxLon := int32(math.Round((segMaxLon - globalMinLon) * 1000000))
 		deltaMaxLat := int32(math.Round((segMaxLat - globalMinLat) * 1000000))
-		if err := binary.Write(writer, binary.LittleEndian, deltaMinLon); err != nil {
+		if err := writeVarintZigZag(writer, int64(deltaMinLon)); err != nil {
 			return err
 		}
-		if err := binary.Write(writer, binary.LittleEndian, deltaMinLat); err != nil {
+		if err := writeVarintZigZag(writer, int64(deltaMinLat)); err != nil {
 			return err
 		}
-		if err := binary.Write(writer, binary.LittleEndian, deltaMaxLon); err != nil {
+		if err := writeVarintZigZag(writer, int64(deltaMaxLon)); err != nil {
 			return err
 		}
-		if err := binary.Write(writer, binary.LittleEndian, deltaMaxLat); err != nil {
+		if err := writeVarintZigZag(writer, int64(deltaMaxLat)); err != nil {
 			return err
 		}
 
-		if err := binary.Write(writer, binary.LittleEndian, uint32(len(seg.features))); err != nil {
+		if err := writeUvarint(writer, uint64(len(seg.features))); err != nil {
 			return err
 		}
 
 		for _, f := range seg.features {
-			titleBytes := []byte(f.title)
-			if len(titleBytes) > 255 {
-				return fmt.Errorf("title too long: %q exceeds 255 bytes", f.title)
+			stableIDs := []uint16(nil)
+			if f.stableID != "" {
+				ids, ok := stablePieceIDs[f.stableID]
+				if !ok {
+					return fmt.Errorf("missing stable id pieces for stable id %q", f.stableID)
+				}
+				stableIDs = ids
 			}
-			if err := binary.Write(writer, binary.LittleEndian, uint8(len(titleBytes))); err != nil {
+			if len(stableIDs) > math.MaxUint8 {
+				return fmt.Errorf("too many stable id pieces in stable id %q: %d exceeds uint8 capacity", f.stableID, len(stableIDs))
+			}
+			if err := writeUvarint(writer, uint64(len(stableIDs))); err != nil {
 				return err
 			}
-			if _, err := writer.Write(titleBytes); err != nil {
+			for _, pieceID := range stableIDs {
+				if err := writeUvarint(writer, uint64(pieceID)); err != nil {
+					return err
+				}
+			}
+			pieceIDs := []uint16(nil)
+			if f.title != "" {
+				ids, ok := titlePieceIDs[f.title]
+				if !ok {
+					return fmt.Errorf("missing title pieces for title %q", f.title)
+				}
+				pieceIDs = ids
+			}
+			if len(pieceIDs) > math.MaxUint8 {
+				return fmt.Errorf("too many title pieces in feature title %q: %d exceeds uint8 capacity", f.title, len(pieceIDs))
+			}
+			if err := writeUvarint(writer, uint64(len(pieceIDs))); err != nil {
 				return err
 			}
-			if err := binary.Write(writer, binary.LittleEndian, f.priority); err != nil {
+			for _, pieceID := range pieceIDs {
+				if err := writeUvarint(writer, uint64(pieceID)); err != nil {
+					return err
+				}
+			}
+			if err := writeUvarint(writer, uint64(f.priority)); err != nil {
 				return err
 			}
-			if err := binary.Write(writer, binary.LittleEndian, f.sourceDataset); err != nil {
+			if err := writeUvarint(writer, uint64(f.sourceDataset)); err != nil {
 				return err
 			}
-			if err := binary.Write(writer, binary.LittleEndian, f.routeID); err != nil {
+			if err := writeUvarint(writer, uint64(f.routeID)); err != nil {
 				return err
 			}
 
 			if len(f.coords) > math.MaxUint16 {
 				return fmt.Errorf("too many coordinates in feature: %d exceeds uint16 capacity", len(f.coords))
 			}
-			if err := binary.Write(writer, binary.LittleEndian, uint16(len(f.coords))); err != nil {
+			if err := writeUvarint(writer, uint64(len(f.coords))); err != nil {
 				return err
 			}
-
-			for _, coord := range f.coords {
-				dLon := int32(math.Round((coord[0] - globalMinLon) * 1000000))
-				dLat := int32(math.Round((coord[1] - globalMinLat) * 1000000))
-				if err := binary.Write(writer, binary.LittleEndian, dLon); err != nil {
+			prevLon := int32(0)
+			prevLat := int32(0)
+			for i, coord := range f.coords {
+				absLon := int32(math.Round((coord[0] - globalMinLon) * 1000000))
+				absLat := int32(math.Round((coord[1] - globalMinLat) * 1000000))
+				dLon := absLon
+				dLat := absLat
+				if i > 0 {
+					dLon = absLon - prevLon
+					dLat = absLat - prevLat
+				}
+				if err := writeVarintZigZag(writer, int64(dLon)); err != nil {
 					return err
 				}
-				if err := binary.Write(writer, binary.LittleEndian, dLat); err != nil {
+				if err := writeVarintZigZag(writer, int64(dLat)); err != nil {
 					return err
 				}
+				prevLon = absLon
+				prevLat = absLat
 			}
 		}
 	}
@@ -1315,14 +1569,14 @@ type spatialIndex struct {
 }
 
 type segmentAssignment struct {
-	priority      uint8
-	start         orb.Point
-	end           orb.Point
-	length        float64
+	priority       uint8
+	start          orb.Point
+	end            orb.Point
+	length         float64
 	distanceMeters float64
-	objectID      int
-	sourceDataset uint8
-	segmentIndex  int
+	objectID       int
+	sourceDataset  uint8
+	segmentIndex   int
 }
 
 type overlapAttributionResult struct {
@@ -1586,14 +1840,14 @@ func overlapAttribution(line orb.LineString, idx *spatialIndex, sourceDataset ui
 			continue
 		}
 		result.assignments = append(result.assignments, segmentAssignment{
-			priority:      bestPriority,
-			start:         line[i],
-			end:           line[i+1],
-			length:        segLength,
+			priority:       bestPriority,
+			start:          line[i],
+			end:            line[i+1],
+			length:         segLength,
 			distanceMeters: bestDist,
-			objectID:      bestObjectID,
-			sourceDataset: sourceDataset,
-			segmentIndex:  i,
+			objectID:       bestObjectID,
+			sourceDataset:  sourceDataset,
+			segmentIndex:   i,
 		})
 		result.totalLength += segLength
 		result.byPriority[bestPriority] += segLength

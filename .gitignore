@@ -1,5 +1,8 @@
+api
 events
 *.db
+*-shm
+*-wal
 features*.bin
 *.geojson
 debug*.json
