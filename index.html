@@ -137,6 +137,27 @@
         outline-color: #78c2b7;
       }
     }
+    .leaflet-bar {
+      border: 1px solid rgba(17, 24, 39, 0.16);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+    }
+    .leaflet-bar a,
+    .leaflet-bar a:hover {
+      background: rgba(255, 255, 255, 0.96);
+      color: #1f2937;
+      border-bottom: 1px solid rgba(17, 24, 39, 0.12);
+    }
+    .leaflet-bar a:last-child {
+      border-bottom: 0;
+    }
+    .leaflet-bar a:focus-visible {
+      position: relative;
+      z-index: 1;
+      outline: 2px solid #017A74;
+      outline-offset: -2px;
+    }
     .leaflet-control-locate a {
       font-size: 18px;
       font-weight: 700;
@@ -154,15 +175,24 @@
       cursor: default;
       opacity: 0.45;
     }
-    .leaflet-control-locate a:focus-visible {
-      outline: 2px solid #017A74;
-      outline-offset: 2px;
-    }
     @media (prefers-color-scheme: dark) {
+      .leaflet-bar {
+        border-color: rgba(120, 130, 145, 0.45);
+        box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+      }
+      .leaflet-bar a,
+      .leaflet-bar a:hover {
+        background: rgba(27, 31, 36, 0.96);
+        color: #e6e8eb;
+        border-bottom-color: rgba(120, 130, 145, 0.3);
+      }
+      .leaflet-bar a:active {
+        background: rgba(49, 57, 68, 0.98);
+      }
       .leaflet-control-locate a {
         color: #e6e8eb;
       }
-      .leaflet-control-locate a:focus-visible {
+      .leaflet-bar a:focus-visible {
         outline-color: #78c2b7;
       }
     }
