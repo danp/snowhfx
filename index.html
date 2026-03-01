@@ -263,11 +263,13 @@
       display: inline;
     }
     .event-status-toggle {
-      display: inline-flex;
       align-items: center;
       gap: 6px;
       font-weight: 600;
       white-space: nowrap;
+    }
+    .event-status-toggle:not([hidden]) {
+      display: inline-flex;
     }
     .event-status-toggle::before {
       content: "i";
