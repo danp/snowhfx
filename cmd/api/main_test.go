@@ -22,7 +22,10 @@ func setupTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS events (observation_id INTEGER PRIMARY KEY, event_id TEXT, state TEXT, end_time DATETIME)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS observations (id INTEGER PRIMARY KEY, t DATETIME, content_id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS events (observation_id INTEGER PRIMARY KEY, event_id TEXT, state TEXT, update_time DATETIME, end_time DATETIME, service_update TEXT)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := ensureSchema(db); err != nil {
@@ -265,10 +268,13 @@ func TestNewEventExpiresExistingReports(t *testing.T) {
 func TestCurrentEventEndpoint(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO observations (id, t, content_id) VALUES (2, '2026-02-12T13:15:00Z', 1)`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec(`INSERT INTO events (observation_id, event_id, state, end_time) VALUES (1, '2026-02-11', 'ended', '2026-02-12T10:30:00Z')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO events (observation_id, event_id, state, end_time) VALUES (2, '2026-02-11', 'dormant', NULL)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO events (observation_id, event_id, state, update_time, end_time, service_update) VALUES (2, '2026-02-11', 'dormant', NULL, NULL, 'Winter weather event underway; crews preparing.')`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -289,5 +295,11 @@ func TestCurrentEventEndpoint(t *testing.T) {
 	}
 	if payload.MaxEndTime != "2026-02-12T10:30:00Z" {
 		t.Fatalf("unexpected max_end_time: %q", payload.MaxEndTime)
+	}
+	if payload.UpdateTime != "2026-02-12T13:15:00Z" {
+		t.Fatalf("unexpected update_time: %q", payload.UpdateTime)
+	}
+	if payload.ServiceUpdate != "Winter weather event underway; crews preparing." {
+		t.Fatalf("unexpected service_update: %q", payload.ServiceUpdate)
 	}
 }

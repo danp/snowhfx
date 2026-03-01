@@ -63,9 +63,11 @@ type reportResponse struct {
 }
 
 type currentEventResponse struct {
-	EventID    string `json:"event_id"`
-	State      string `json:"state"`
-	MaxEndTime string `json:"max_end_time"`
+	EventID       string `json:"event_id"`
+	State         string `json:"state"`
+	MaxEndTime    string `json:"max_end_time"`
+	UpdateTime    string `json:"update_time,omitempty"`
+	ServiceUpdate string `json:"service_update,omitempty"`
 }
 
 func main() {
@@ -420,20 +422,27 @@ func currentEvent(ctx context.Context, q interface {
 	var eventID sql.NullString
 	var state sql.NullString
 	var maxEndTime sql.NullString
+	var updateTime sql.NullString
+	var serviceUpdate sql.NullString
 	err := q.QueryRowContext(ctx, `WITH latest AS (
   SELECT
-    event_id,
-    state
+    e.event_id,
+    e.state,
+    COALESCE(e.update_time, o.t) AS update_time,
+    e.service_update
   FROM
-    events
+    events e
+    LEFT JOIN observations o ON o.id = e.observation_id
   ORDER BY
-    observation_id DESC
+    e.observation_id DESC
   LIMIT
     1
 )
 SELECT
   latest.event_id AS event_id,
   latest.state AS state,
+  latest.update_time AS update_time,
+  latest.service_update AS service_update,
   (
     SELECT
       max(end_time)
@@ -441,7 +450,7 @@ SELECT
       events
   ) AS max_end_time
 FROM
-  latest`).Scan(&eventID, &state, &maxEndTime)
+  latest`).Scan(&eventID, &state, &updateTime, &serviceUpdate, &maxEndTime)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return currentEventResponse{}, nil
@@ -457,6 +466,12 @@ FROM
 	}
 	if maxEndTime.Valid {
 		res.MaxEndTime = maxEndTime.String
+	}
+	if updateTime.Valid {
+		res.UpdateTime = updateTime.String
+	}
+	if serviceUpdate.Valid {
+		res.ServiceUpdate = serviceUpdate.String
 	}
 	return res, nil
 }

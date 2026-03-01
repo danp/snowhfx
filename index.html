@@ -87,6 +87,7 @@
       font-weight: 700;
     }
     .about-toggle,
+    .event-status-toggle,
     .reports-filter-toggle {
       border: 1px solid var(--control-border);
       border-radius: 6px;
@@ -126,6 +127,7 @@
     }
     .quick-toggle button:focus-visible,
     .about-toggle:focus-visible,
+    .event-status-toggle:focus-visible,
     .reports-filter-toggle:focus-visible {
       outline: 2px solid #017A74;
       outline-offset: 2px;
@@ -133,6 +135,7 @@
     @media (prefers-color-scheme: dark) {
       .quick-toggle button:focus-visible,
       .about-toggle:focus-visible,
+      .event-status-toggle:focus-visible,
       .reports-filter-toggle:focus-visible {
         outline-color: #78c2b7;
       }
@@ -258,6 +261,30 @@
     .priority-deadline-date,
     .priority-deadline-time {
       display: inline;
+    }
+    .event-status-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .event-status-toggle::before {
+      content: "i";
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #017A74;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .event-status-time {
+      font-weight: 700;
     }
     .about-panel {
       position: fixed;
@@ -514,6 +541,10 @@
         display: block;
         line-height: 1.05;
       }
+      .event-status-toggle {
+        padding: 4px 6px;
+        font-size: 11px;
+      }
       .report-email-body {
         min-height: 140px;
       }
@@ -535,6 +566,7 @@
   <div class="header">
     <div class="priorities" id="priorities-header"></div>
     <div class="mobile-controls" id="mobile-controls">
+      <button class="event-status-toggle" id="event-status-toggle" type="button" aria-expanded="false" aria-controls="event-status-panel" aria-label="Latest update" hidden>Update</button>
       <button class="about-toggle" id="about-toggle" type="button" aria-expanded="false" aria-controls="about-panel">About</button>
       <button class="reports-filter-toggle" id="reports-filter-toggle" type="button" aria-pressed="false">Reports</button>
       <div class="quick-toggle" role="group" aria-label="Map mode">
@@ -582,6 +614,16 @@
       </p>
       <div class="about-actions">
         <button class="about-close" id="about-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+  <div class="about-panel" id="event-status-panel" aria-hidden="true">
+    <div class="about-card" role="dialog" aria-modal="true" aria-labelledby="event-status-title">
+      <h2 id="event-status-title">Latest weather update</h2>
+      <p class="event-status-time" id="event-status-time"></p>
+      <p id="event-status-text"></p>
+      <div class="about-actions">
+        <button class="about-close" id="event-status-close" type="button">Close</button>
       </div>
     </div>
   </div>
@@ -692,10 +734,10 @@
       prefersDark.addListener((event) => setBasemap(event.matches));
     }
 
-    // Format a deadline date for display.
-    function formatDeadline(deadline) {
-      if (!deadline) return "Pending";
-      const d = new Date(deadline);
+    function formatRelativeTimestamp(timestamp) {
+      if (!timestamp) return '';
+      const d = new Date(timestamp);
+      if (!Number.isFinite(d.getTime())) return '';
       const now = new Date();
       const trimMinutes = (value) => value.replace(':00 ', ' ');
       if (d > now - (3 * 86400 * 1000)) {
@@ -704,11 +746,36 @@
       return trimMinutes(d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }));
     }
 
-    function formatDeadlineParts(deadline) {
+    function formatPendingLabel(status) {
+      if (!status) return 'Pending';
+      const parts = [];
+      const updateStamp = formatRelativeTimestamp(status.updateTime);
+      if (updateStamp) {
+        parts.push(`Updated ${updateStamp}`);
+      }
+      if (status.serviceUpdate) {
+        parts.push(status.serviceUpdate);
+      }
+      if (parts.length === 0) return 'Pending';
+      return `Pending (${parts.join('; ')})`;
+    }
+
+    // Format a deadline date for display.
+    function formatDeadline(deadline, status) {
+      if (!deadline) return formatPendingLabel(status);
+      const d = new Date(deadline);
+      if (!Number.isFinite(d.getTime())) return formatPendingLabel(status);
+      return formatRelativeTimestamp(d);
+    }
+
+    function formatDeadlineParts(deadline, status) {
       if (!deadline) {
         return { date: 'Pending', time: '' };
       }
       const d = new Date(deadline);
+      if (!Number.isFinite(d.getTime())) {
+        return formatDeadlineParts(null, status);
+      }
       const now = new Date();
       const trimMinutes = (value) => value.replace(':00 ', ' ');
       const recent = d > now - (3 * 86400 * 1000);
@@ -875,6 +942,12 @@
       : 'https://api.snowhfx.danp.net/api/v1';
     const REPORTS_API_ENDPOINT = `${API_BASE_ENDPOINT}/community-reports`;
     const CURRENT_EVENT_API_ENDPOINT = `${API_BASE_ENDPOINT}/current-event`;
+    let currentEventSummary = null;
+    const eventStatusToggle = document.getElementById('event-status-toggle');
+    const eventStatusPanel = document.getElementById('event-status-panel');
+    const eventStatusClose = document.getElementById('event-status-close');
+    const eventStatusTime = document.getElementById('event-status-time');
+    const eventStatusText = document.getElementById('event-status-text');
     let communityReports = [];
     let showReportsMode = localStorage.getItem(REPORTS_FILTER_STORAGE_KEY) === '1';
     const featuresLayer = L.layerGroup().addTo(map);
@@ -1227,6 +1300,11 @@
       .then(async (data) => {
         let state = data.state;
         let maxEndTime = data.max_end_time;
+        currentEventSummary = {
+          state,
+          updateTime: data.update_time || '',
+          serviceUpdate: data.service_update || ''
+        };
         if (state === "active") {
           maxEndTime = null;
         }
@@ -1244,9 +1322,9 @@
         window.priorities = priorities;
         // Update the header with priority details.
         const prioritiesHeader = document.getElementById('priorities-header');
-        prioritiesHeader.innerHTML = Object.entries(priorities)
+        const priorityItemsHtml = Object.entries(priorities)
           .map(([priority, details]) => {
-            const deadlineParts = formatDeadlineParts(details.Deadline);
+            const deadlineParts = formatDeadlineParts(details.Deadline, currentEventSummary);
             return `
               <div class="priority-item priority-${priority}">
                 <div class="priority-square">${priority}</div>
@@ -1258,6 +1336,23 @@
             `;
           })
           .join('');
+        const statusTime = formatRelativeTimestamp(currentEventSummary.updateTime);
+        const statusText = (currentEventSummary.serviceUpdate || '').trim();
+        const showEventStatus = state === "active" && (statusTime || statusText);
+        prioritiesHeader.innerHTML = priorityItemsHtml;
+        if (!showEventStatus && eventStatusPanel.classList.contains('is-open')) {
+          setEventStatusOpen(false);
+        }
+        eventStatusToggle.hidden = !showEventStatus;
+        if (showEventStatus) {
+          eventStatusTime.textContent = statusTime ? `Updated ${statusTime}` : 'Latest update available';
+          eventStatusText.textContent = statusText || 'No additional details available.';
+          eventStatusToggle.title = statusTime ? `Latest update: ${statusTime}` : 'Latest update available';
+        } else {
+          eventStatusTime.textContent = '';
+          eventStatusText.textContent = '';
+          eventStatusToggle.title = '';
+        }
         const mobileControls = document.getElementById('mobile-controls');
         const quickButtons = mobileControls.querySelectorAll('button[data-mode]');
         const aboutToggle = document.getElementById('about-toggle');
@@ -1451,6 +1546,17 @@
           }
         }
 
+        function setEventStatusOpen(isOpen) {
+          eventStatusPanel.classList.toggle('is-open', isOpen);
+          eventStatusPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+          eventStatusToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+          if (isOpen) {
+            eventStatusClose.focus();
+          } else {
+            eventStatusToggle.focus();
+          }
+        }
+
         aboutToggle.addEventListener('click', () => setAboutOpen(true));
         aboutClose.addEventListener('click', () => setAboutOpen(false));
         aboutPanel.addEventListener('click', (event) => {
@@ -1458,9 +1564,19 @@
             setAboutOpen(false);
           }
         });
+        eventStatusToggle.addEventListener('click', () => setEventStatusOpen(true));
+        eventStatusClose.addEventListener('click', () => setEventStatusOpen(false));
+        eventStatusPanel.addEventListener('click', (event) => {
+          if (event.target === eventStatusPanel) {
+            setEventStatusOpen(false);
+          }
+        });
         document.addEventListener('keydown', (event) => {
           if (event.key === 'Escape' && aboutPanel.classList.contains('is-open')) {
             setAboutOpen(false);
+          }
+          if (event.key === 'Escape' && eventStatusPanel.classList.contains('is-open')) {
+            setEventStatusOpen(false);
           }
         });
 
