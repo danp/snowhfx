@@ -137,6 +137,35 @@
         outline-color: #78c2b7;
       }
     }
+    .leaflet-control-locate a {
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 30px;
+      text-align: center;
+      text-decoration: none;
+      color: #222;
+      font-family: Arial, sans-serif;
+    }
+    .leaflet-control-locate a.is-loading {
+      cursor: progress;
+      opacity: 0.7;
+    }
+    .leaflet-control-locate a.is-disabled {
+      cursor: default;
+      opacity: 0.45;
+    }
+    .leaflet-control-locate a:focus-visible {
+      outline: 2px solid #017A74;
+      outline-offset: 2px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .leaflet-control-locate a {
+        color: #e6e8eb;
+      }
+      .leaflet-control-locate a:focus-visible {
+        outline-color: #78c2b7;
+      }
+    }
     .priorities {
       display: flex;
       align-items: center;
@@ -1261,6 +1290,76 @@
           });
         }
 
+        function addLocationControl() {
+          const control = L.control({ position: 'topleft' });
+          let resetTimer = null;
+
+          control.onAdd = function() {
+            const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-locate');
+            const button = L.DomUtil.create('a', '', container);
+            button.href = '#';
+            button.setAttribute('role', 'button');
+            button.setAttribute('aria-label', 'Center map to my location');
+            button.setAttribute('title', 'Center to my location');
+            button.innerHTML = '&#9678;';
+
+            const setButtonState = (label, title, className) => {
+              if (resetTimer) {
+                clearTimeout(resetTimer);
+                resetTimer = null;
+              }
+              button.innerHTML = label;
+              button.setAttribute('title', title);
+              button.classList.remove('is-loading', 'is-disabled');
+              if (className) {
+                button.classList.add(className);
+              }
+            };
+
+            const queueReset = (label, title, className) => {
+              setButtonState(label, title, className);
+              resetTimer = window.setTimeout(() => {
+                resetTimer = null;
+                setButtonState('&#9678;', 'Center to my location');
+              }, 2200);
+            };
+
+            if (!navigator.geolocation) {
+              setButtonState('!', 'Location unavailable', 'is-disabled');
+            } else {
+              L.DomEvent.on(button, 'click', (event) => {
+                L.DomEvent.stop(event);
+                if (button.classList.contains('is-loading')) {
+                  return;
+                }
+                setButtonState('...', 'Locating...', 'is-loading');
+                navigator.geolocation.getCurrentPosition(
+                  (position) => {
+                    const coords = [position.coords.latitude, position.coords.longitude];
+                    map.setView(coords, Math.max(map.getZoom(), 16));
+                    saveMapState(map);
+                    queueReset('&#10003;', 'Centered on your location');
+                  },
+                  () => {
+                    queueReset('!', 'Unable to determine your location');
+                  },
+                  {
+                    enableHighAccuracy: true,
+                    timeout: 10000,
+                    maximumAge: 60000
+                  }
+                );
+              });
+            }
+
+            L.DomEvent.disableClickPropagation(container);
+            L.DomEvent.disableScrollPropagation(container);
+            return container;
+          };
+
+          control.addTo(map);
+        }
+
         function updateReportsFilterToggle() {
           reportsFilterToggle.classList.toggle('is-active', showReportsMode);
           reportsFilterToggle.setAttribute('aria-pressed', showReportsMode ? 'true' : 'false');
@@ -1300,6 +1399,7 @@
             await loadDataset(mode);
           });
         });
+        addLocationControl();
         reportsFilterToggle.addEventListener('click', () => {
           setReportsMode(!showReportsMode);
         });
