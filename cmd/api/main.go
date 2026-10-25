@@ -158,6 +158,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer features.Close()
 	log.Printf("feature data stored in %s", featuresDir)
 
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=journal_mode=WAL&_pragma=foreign_keys=ON&_pragma=busy_timeout=5000")

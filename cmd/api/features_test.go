@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,6 +74,7 @@ func TestFeatureManifestAndImmutableFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() })
 	handler := newAPIHandler(nil, store)
 	w := featureRequest(handler, http.MethodGet, "/api/v1/features/manifest.json", "")
 	if w.Code != http.StatusOK || w.Header().Get("Cache-Control") != "no-cache" {
@@ -91,7 +94,7 @@ func TestFeatureManifestAndImmutableFiles(t *testing.T) {
 	for mode, version := range manifest.Datasets {
 		path := "/api/v1/features/" + version.SHA256 + ".bin"
 		w := featureRequest(handler, http.MethodGet, path, "")
-		if w.Code != http.StatusOK || len(w.Body.Bytes()) != version.Size {
+		if w.Code != http.StatusOK || int64(w.Body.Len()) != version.Size {
 			t.Fatalf("%s response: %d size=%d want=%d", mode, w.Code, w.Body.Len(), version.Size)
 		}
 		if got := fmt.Sprintf("%x", sha256.Sum256(w.Body.Bytes())); got != version.SHA256 {
@@ -111,6 +114,13 @@ func TestFeatureManifestAndImmutableFiles(t *testing.T) {
 		if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != fmt.Sprint(version.Size) {
 			t.Fatalf("HEAD response: %d %v %s", head.Code, head.Header(), head.Body.String())
 		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Range", "bytes=0-3")
+		partial := httptest.NewRecorder()
+		handler.ServeHTTP(partial, req)
+		if partial.Code != http.StatusPartialContent || partial.Body.String() != "SHFX" || partial.Header().Get("Content-Range") != fmt.Sprintf("bytes 0-3/%d", version.Size) {
+			t.Fatalf("range response: %d %v %s", partial.Code, partial.Header(), partial.Body.String())
+		}
 	}
 }
 
@@ -120,10 +130,12 @@ func TestFeatureStorePreservesDeploymentsAndRollbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { old.Close() })
 	current, err := newFeatureStore(dir, featureBundle(3))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { current.Close() })
 	if bytes.Equal(old.manifest, current.manifest) {
 		t.Fatal("changed data should change the manifest")
 	}
@@ -136,10 +148,16 @@ func TestFeatureStorePreservesDeploymentsAndRollbacks(t *testing.T) {
 	if err != nil || !bytes.Equal(old.manifest, rollback.manifest) || old.manifestETag != rollback.manifestETag {
 		t.Fatalf("rollback failed: %v", err)
 	}
+	t.Cleanup(func() { rollback.Close() })
 }
 
 func TestConcurrentFeaturePublication(t *testing.T) {
 	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
 	data := featureFixture(1)
 	name := fmt.Sprintf("%x.bin", sha256.Sum256(data))
 	var wg sync.WaitGroup
@@ -148,7 +166,7 @@ func TestConcurrentFeaturePublication(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errors <- publishFeature(dir, name, data)
+			errors <- publishFeature(root, name, bytes.NewReader(data))
 		}()
 	}
 	wg.Wait()
@@ -195,6 +213,7 @@ func TestFeatureFilesRejectCorruptionAndUnknownNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { store.Close() })
 	handler := newAPIHandler(nil, store)
 	for _, name := range []string{"features.bin", strings.Repeat("0", 64) + ".bin", strings.Repeat("g", 64) + ".bin"} {
 		w := featureRequest(handler, http.MethodGet, "/api/v1/features/"+name, "")
@@ -216,5 +235,91 @@ func TestFeatureFilesRejectCorruptionAndUnknownNames(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dir, hash+".bin"))
 	if err != nil || string(data) != "changed" {
 		t.Fatal("startup overwrote an existing immutable file")
+	}
+}
+
+func TestFeatureRootRejectsEscapingSymlinks(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("relative=%v", relative), func(t *testing.T) {
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "features")
+			store, err := newFeatureStore(dir, featureBundle(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { store.Close() })
+			data := featureFixture(3)
+			hash := fmt.Sprintf("%x", sha256.Sum256(data))
+			outside := filepath.Join(parent, "outside.bin")
+			if err := os.WriteFile(outside, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			target := outside
+			if relative {
+				target = "../outside.bin"
+			}
+			if err := os.Symlink(target, filepath.Join(dir, hash+".bin")); err != nil {
+				t.Fatal(err)
+			}
+			w := featureRequest(newAPIHandler(nil, store), http.MethodGet, "/api/v1/features/"+hash+".bin", "")
+			if w.Code != http.StatusInternalServerError || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("outside file was served: %d %s", w.Code, w.Body.String())
+			}
+			if _, err := newFeatureStore(dir, featureBundle(3)); err == nil {
+				t.Fatal("startup accepted a published path pointing outside the root")
+			}
+		})
+	}
+}
+
+func TestFeatureRootTracksDirectoryRename(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "features")
+	store, err := newFeatureStore(dir, featureBundle(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := os.Rename(dir, filepath.Join(parent, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	hash := fmt.Sprintf("%x", sha256.Sum256(featureFixture(1)))
+	w := featureRequest(newAPIHandler(nil, store), http.MethodGet, "/api/v1/features/"+hash+".bin", "")
+	if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), featureFixture(1)) {
+		t.Fatalf("root did not retain the original directory: %d %s", w.Code, w.Body.String())
+	}
+}
+
+type openOnlyBundle struct{ fs.FS }
+
+func (openOnlyBundle) ReadFile(string) ([]byte, error) {
+	return nil, errors.New("whole-file reads are disabled")
+}
+
+func TestFeatureBundleUsesStreamingReads(t *testing.T) {
+	store, err := newFeatureStore(t.TempDir(), openOnlyBundle{featureBundle(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+}
+
+func TestFailedFeatureCopyIsNotPublished(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	hash := fmt.Sprintf("%x", sha256.Sum256(featureFixture(1)))
+	if err := publishFeature(root, hash+".bin", strings.NewReader("wrong content")); err == nil {
+		t.Fatal("unexpected content was published at a hash URL")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed copy left files behind: %v, %v", entries, err)
 	}
 }

@@ -80,8 +80,12 @@ Keep the same features directory across deployments and rollbacks. Older files r
 
 The manifest uses `Cache-Control: no-cache` with an ETag for conditional revalidation. Hashed binaries use `Cache-Control: public, max-age=31536000, immutable`; a hash URL never serves different bytes. Neither replacing the executable nor rolling it back deletes old datasets.
 
+Feature reads and publication are confined to an `os.Root` opened on the data directory. Startup validates the embedded files incrementally and streams them to disk. Requests stream-hash the stored file, rewind it, and pass the open file to `http.ServeContent`, preserving conditional requests and byte ranges without allocating a whole-file response buffer. Only the small manifest is retained in the Go heap; the bundled bytes remain part of the executable's read-only data, and the OS manages filesystem caching.
+
 ## Tests
 
 Run `go test ./...` for the Go code and `node --test tests/map.test.cjs` for the map's loading behavior. The map tests use Node's built-in test runner and require no npm dependencies.
 
 After generating feature data, run `node tests/map.bench.cjs` to measure polyline counts for sample Halifax views and synthetic report lookup costs. An optional argument selects a different features binary. These measurements use the Node map harness; they do not measure browser frame rates.
+
+Run `go test ./cmd/api -run '^$' -bench BenchmarkServeFeature -benchmem` to measure feature-serving allocations independently of response size. The benchmark discards response bodies so its measurements do not include a client's full-file buffer.

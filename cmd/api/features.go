@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -26,7 +27,7 @@ var bundledFeatures embed.FS
 
 type featureVersion struct {
 	SHA256 string `json:"sha256"`
-	Size   int    `json:"size"`
+	Size   int64  `json:"size"`
 }
 
 type featureManifest struct {
@@ -35,7 +36,7 @@ type featureManifest struct {
 }
 
 type featureStore struct {
-	dir          string
+	root         *os.Root
 	manifest     []byte
 	manifestETag string
 }
@@ -59,32 +60,43 @@ func defaultFeaturesDir() (string, error) {
 func newFeatureStore(dir string, bundle fs.FS) (*featureStore, error) {
 	manifest := featureManifest{Datasets: make(map[string]featureVersion)}
 	// Validate the complete bundle before publishing any of it.
-	contents := make(map[string][]byte)
-	for _, dataset := range []struct{ mode, file string }{
+	datasets := []struct{ mode, file string }{
 		{"sidewalks", "features.bin"},
 		{"cycling", "features_cycling.bin"},
-	} {
-		data, err := fs.ReadFile(bundle, "featuredata/"+dataset.file)
+	}
+	for _, dataset := range datasets {
+		file, err := bundle.Open("featuredata/" + dataset.file)
 		if err != nil {
 			return nil, fmt.Errorf("read bundled %s: %w; build with ./scripts/build-api.sh", dataset.file, err)
 		}
-		features, _, header, err := featuresbin.Read(bytes.NewReader(data))
+		version, header, err := inspectFeature(file)
 		if err != nil {
 			return nil, fmt.Errorf("validate bundled %s: %w", dataset.file, err)
 		}
-		if len(features) == 0 {
-			return nil, fmt.Errorf("bundled %s contains no features", dataset.file)
-		}
 		manifest.FormatVersion = header.FormatVersion
-		hash := fmt.Sprintf("%x", sha256.Sum256(data))
-		manifest.Datasets[dataset.mode] = featureVersion{SHA256: hash, Size: len(data)}
-		contents[hash] = data
+		manifest.Datasets[dataset.mode] = version
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create features directory: %w", err)
 	}
-	for hash, data := range contents {
-		if err := publishFeature(dir, hash+".bin", data); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			root.Close()
+		}
+	}()
+	for _, dataset := range datasets {
+		file, err := bundle.Open("featuredata/" + dataset.file)
+		if err != nil {
+			return nil, err
+		}
+		err = publishFeature(root, manifest.Datasets[dataset.mode].SHA256+".bin", file)
+		file.Close()
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -92,37 +104,86 @@ func newFeatureStore(dir string, bundle fs.FS) (*featureStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	complete = true
 	return &featureStore{
-		dir:          dir,
+		root:         root,
 		manifest:     data,
 		manifestETag: fmt.Sprintf(`"%x"`, sha256.Sum256(data)),
 	}, nil
 }
 
-func publishFeature(dir, name string, data []byte) error {
-	destination := filepath.Join(dir, name)
-	verifyExisting := func() error {
-		existing, err := os.ReadFile(destination)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(existing, data) {
-			return fmt.Errorf("immutable feature file %s has unexpected content", destination)
-		}
-		return nil
+func inspectFeature(file fs.File) (featureVersion, featuresbin.Header, error) {
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return featureVersion{}, featuresbin.Header{}, err
 	}
-	if _, err := os.Stat(destination); err == nil {
-		return verifyExisting()
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	hash := sha256.New()
+	header, err := featuresbin.Validate(io.TeeReader(file, hash))
+	if err != nil {
+		return featureVersion{}, featuresbin.Header{}, err
 	}
-	temp, err := os.CreateTemp(dir, ".features-*")
+	return featureVersion{SHA256: hex.EncodeToString(hash.Sum(nil)), Size: info.Size()}, header, nil
+}
+
+func (store *featureStore) Close() error {
+	return store.root.Close()
+}
+
+func verifyFeature(file *os.File, expectedHash string) error {
+	info, err := file.Stat()
 	if err != nil {
 		return err
 	}
-	defer os.Remove(temp.Name())
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("feature file %s is not a regular file", file.Name())
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != expectedHash {
+		return fmt.Errorf("immutable feature file %s has unexpected content", file.Name())
+	}
+	_, err = file.Seek(0, io.SeekStart)
+	return err
+}
+
+func publishFeature(root *os.Root, name string, source io.Reader) error {
+	hash := strings.TrimSuffix(name, ".bin")
+	verifyExisting := func() error {
+		file, err := root.Open(name)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		return verifyFeature(file, hash)
+	}
+	if err := verifyExisting(); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tempName, err := randomID(".features-", 16)
+	if err != nil {
+		return err
+	}
+	temp, err := root.OpenFile(tempName, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(tempName)
 	defer temp.Close()
-	if _, err := temp.Write(data); err != nil {
+	if _, err := io.Copy(temp, source); err != nil {
+		return err
+	}
+	if _, err := temp.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := verifyFeature(temp, hash); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
 		return err
 	}
 	if err := temp.Close(); err != nil {
@@ -130,11 +191,11 @@ func publishFeature(dir, name string, data []byte) error {
 	}
 	// A hard link publishes a complete file atomically without replacing an
 	// existing version, including if two API processes start concurrently.
-	if err := os.Link(temp.Name(), destination); err != nil {
+	if err := root.Link(tempName, name); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return verifyExisting()
 		}
-		return fmt.Errorf("publish %s: %w", destination, err)
+		return fmt.Errorf("publish %s: %w", name, err)
 	}
 	return nil
 }
@@ -160,17 +221,22 @@ func (store *featureStore) serveFeature(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	data, err := os.ReadFile(filepath.Join(store.dir, name))
+	file, err := store.root.Open(name)
 	if errors.Is(err, os.ErrNotExist) {
 		http.NotFound(w, r)
 		return
 	}
-	if err != nil || sha256.Sum256(data) != [sha256.Size]byte(decoded) {
+	if err != nil {
+		http.Error(w, "feature data unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+	if err := verifyFeature(file, hash); err != nil {
 		http.Error(w, "feature data unavailable", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("ETag", `"`+hash+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(data))
+	http.ServeContent(w, r, name, time.Time{}, file)
 }
