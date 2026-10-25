@@ -952,6 +952,8 @@
       : 'https://api.snowhfx.danp.net/api/v1';
     const REPORTS_API_ENDPOINT = `${API_BASE_ENDPOINT}/community-reports`;
     const CURRENT_EVENT_API_ENDPOINT = `${API_BASE_ENDPOINT}/current-event`;
+    const FEATURES_API_ENDPOINT = `${API_BASE_ENDPOINT}/features`;
+    let featureManifestRequest = null;
     let currentEventSummary = null;
     const refreshState = {
       weather: { lastSuccess: null, failed: false },
@@ -1283,11 +1285,11 @@
       });
     }
 
-    async function fetchAPIJSON(url) {
+    async function fetchAPIJSON(url, cache = 'no-store') {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 10000);
       try {
-        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        const response = await fetch(url, { signal: controller.signal, cache });
         if (!response.ok) throw new Error(`request failed: ${response.status}`);
         return await response.json();
       } finally {
@@ -1378,6 +1380,26 @@
       const data = await decodeSegmentedFeatures(await response.arrayBuffer());
       if (data.segments.length === 0) throw new Error('No segments found in the binary file.');
       return data;
+    }
+
+    function loadFeatureManifest() {
+      if (!featureManifestRequest) {
+        featureManifestRequest = fetchAPIJSON(`${FEATURES_API_ENDPOINT}/manifest.json`, 'no-cache')
+          .then(manifest => {
+            if (manifest?.format_version !== 4) throw new Error('Unsupported feature manifest format');
+            for (const mode of ['sidewalks', 'cycling']) {
+              if (!/^[a-f0-9]{64}$/.test(manifest.datasets?.[mode]?.sha256 || '')) {
+                throw new Error(`Invalid feature version for ${mode}`);
+              }
+            }
+            return manifest;
+          })
+          .catch(error => {
+            featureManifestRequest = null;
+            throw error;
+          });
+      }
+      return featureManifestRequest;
     }
 
     function updateEvent(data) {
@@ -1480,8 +1502,8 @@
       let reportsLoadGeneration = 0;
       let reportsRequest = null;
       const datasetConfig = {
-        sidewalks: { url: 'features.bin', datasetCode: 0 },
-        cycling: { url: 'features_cycling.bin', datasetCode: 1 }
+        sidewalks: { datasetCode: 0 },
+        cycling: { datasetCode: 1 }
       };
       const storedDataset = localStorage.getItem('datasetMode');
       const initialDataset = datasetConfig[storedDataset] ? storedDataset : 'sidewalks';
@@ -1623,7 +1645,10 @@
         const generation = ++datasetLoadGeneration;
         updateQuickToggle(mode);
         try {
-          const data = await loadSegmentedFeatures(config.url);
+          const manifest = await loadFeatureManifest();
+          if (generation !== datasetLoadGeneration) return;
+          const hash = manifest.datasets[mode].sha256;
+          const data = await loadSegmentedFeatures(`${FEATURES_API_ENDPOINT}/${hash}.bin`);
           if (generation !== datasetLoadGeneration) return;
 
           // Commit geometry and its metadata together only for the latest selection.
