@@ -1,7 +1,7 @@
 package featuresbin
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -38,7 +38,7 @@ type RouteEntry struct {
 }
 
 type Reader struct {
-	r          *bytes.Reader
+	r          *bufio.Reader
 	header     Header
 	routes     []RouteEntry
 	namePieces []string
@@ -67,19 +67,16 @@ func (r *Reader) readVarintZigZag() (int64, error) {
 }
 
 func ReadFile(path string) ([]Feature, []RouteEntry, Header, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, Header{}, err
 	}
-	return Read(bytes.NewReader(data))
+	defer f.Close()
+	return Read(f)
 }
 
 func Read(r io.Reader) ([]Feature, []RouteEntry, Header, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, nil, Header{}, err
-	}
-	reader := NewReader(bytes.NewReader(data))
+	reader := NewReader(r)
 	if err := reader.readHeader(); err != nil {
 		return nil, nil, Header{}, err
 	}
@@ -100,8 +97,42 @@ func Read(r io.Reader) ([]Feature, []RouteEntry, Header, error) {
 	return features, reader.routes, reader.header, nil
 }
 
-func NewReader(r *bytes.Reader) *Reader {
-	return &Reader{r: r}
+// Validate checks a complete, nonempty feature file without retaining its
+// contents or decoded geometry. Memory use is limited to the string tables and
+// the feature currently being decoded.
+func Validate(r io.Reader) (Header, error) {
+	reader := NewReader(r)
+	if err := reader.readHeader(); err != nil {
+		return Header{}, err
+	}
+	if err := reader.readRoutes(); err != nil {
+		return Header{}, err
+	}
+	foundFeature := false
+	for {
+		_, ok, err := reader.NextFeature()
+		if err != nil {
+			return Header{}, err
+		}
+		if !ok {
+			break
+		}
+		foundFeature = true
+	}
+	if !foundFeature {
+		return Header{}, fmt.Errorf("feature file contains no features")
+	}
+	if _, err := reader.r.ReadByte(); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("unexpected data after final segment")
+		}
+		return Header{}, err
+	}
+	return reader.header, nil
+}
+
+func NewReader(r io.Reader) *Reader {
+	return &Reader{r: bufio.NewReader(r)}
 }
 
 func (r *Reader) readHeader() error {

@@ -1,6 +1,6 @@
 module github.com/danp/snowhfx
 
-go 1.24
+go 1.27
 
 require (
 	github.com/ncruces/go-sqlite3 v0.23.1

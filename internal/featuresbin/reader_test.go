@@ -3,6 +3,7 @@ package featuresbin
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
 )
 
@@ -67,5 +68,36 @@ func TestReadTruncatedLastSegment(t *testing.T) {
 	data := segmentFixture(t, 2)
 	if _, _, _, err := Read(bytes.NewReader(data[:len(data)-1])); err == nil {
 		t.Fatal("expected an error for a truncated final feature")
+	}
+}
+
+func TestValidateStreaming(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		data  []byte
+		valid bool
+	}{
+		{"multiple segments", segmentFixture(t, 2, 0, 3), true},
+		{"empty last segment", segmentFixture(t, 2, 0), true},
+		{"no features", segmentFixture(t, 0, 0), false},
+		{"truncated feature", segmentFixture(t, 2)[:35], false},
+		{"trailing data", append(segmentFixture(t, 2), 0), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A pipe provides no seeking or whole-file access.
+			r, w := io.Pipe()
+			go func() {
+				defer w.Close()
+				_, _ = w.Write(tc.data)
+			}()
+			defer r.Close()
+			header, err := Validate(r)
+			if (err == nil) != tc.valid {
+				t.Fatalf("Validate() error = %v; valid = %v", err, tc.valid)
+			}
+			if tc.valid && header.FormatVersion != versionV4 {
+				t.Fatalf("unexpected header: %+v", header)
+			}
+		})
 	}
 }
