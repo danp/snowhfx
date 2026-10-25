@@ -965,6 +965,7 @@
     const eventStatusTime = document.getElementById('event-status-time');
     const eventStatusText = document.getElementById('event-status-text');
     let communityReports = [];
+    let communityReportsByKey = new Map();
     let showReportsMode = localStorage.getItem(REPORTS_FILTER_STORAGE_KEY) === '1';
     const featuresLayer = L.layerGroup().addTo(map);
     // Track segments that are currently rendered, keyed by segment index.
@@ -1093,8 +1094,7 @@
         }
         const payload = await fetchAPIJSON(`${REPORTS_API_ENDPOINT}?${params.toString()}`);
         return normalizeReportsResponse(payload)
-          .filter((report) => report && report.segment_key)
-          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          .filter((report) => report && report.segment_key);
       },
       async createReport(report) {
         const response = await fetch(REPORTS_API_ENDPOINT, {
@@ -1110,16 +1110,30 @@
       }
     };
 
+    function setCommunityReports(reports) {
+      const now = Date.now();
+      communityReports = reports
+        .filter(report => !report.expires_at || Date.parse(report.expires_at) > now)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      communityReportsByKey = new Map();
+      for (const report of communityReports) {
+        let reportsForKey = communityReportsByKey.get(report.segment_key);
+        if (!reportsForKey) {
+          reportsForKey = [];
+          communityReportsByKey.set(report.segment_key, reportsForKey);
+        }
+        reportsForKey.push(report);
+      }
+    }
+
     function reportsForFeature(mode, segmentIdx, featureIdx) {
       const key = featureReportKey(mode, segmentIdx, featureIdx);
-      return communityReports
-        .filter((report) => report.segment_key === key)
-        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      return communityReportsByKey.get(key) || [];
     }
 
     function hasReportForFeature(mode, segmentIdx, featureIdx) {
       const key = featureReportKey(mode, segmentIdx, featureIdx);
-      return communityReports.some((report) => report.segment_key === key);
+      return communityReportsByKey.has(key);
     }
 
     function summarizeConditions(conditions) {
@@ -1518,10 +1532,10 @@
         const reportGeneration = ++reportsLoadGeneration;
         const isCurrent = () => generation === datasetLoadGeneration && reportGeneration === reportsLoadGeneration;
         const promise = (async () => {
+          let reports = communityReports;
           try {
-            const reports = await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+            reports = await reportsApi.listReports({ dataset_mode: currentDatasetMode });
             if (!isCurrent()) return;
-            communityReports = reports;
             refreshState.reports = { lastSuccess: new Date(), failed: false };
           } catch (error) {
             if (!isCurrent()) return;
@@ -1530,7 +1544,7 @@
           } finally {
             if (reportsRequest?.promise === promise) reportsRequest = null;
           }
-          communityReports = communityReports.filter(report => !report.expires_at || new Date(report.expires_at) > new Date());
+          setCommunityReports(reports);
           refreshRenderedFeatures();
           updateRefreshStatus();
         })();
@@ -1660,7 +1674,7 @@
           routeTable = data.routes;
           currentDatasetMode = mode;
           currentDatasetCode = config.datasetCode;
-          communityReports = [];
+          setCommunityReports([]);
           refreshState.reports = { lastSuccess: null, failed: false };
           updateRefreshStatus();
           if (!hasLoadedDataset) {

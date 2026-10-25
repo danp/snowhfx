@@ -83,3 +83,5 @@ The manifest uses `Cache-Control: no-cache` with an ETag for conditional revalid
 ## Tests
 
 Run `go test ./...` for the Go code and `node --test tests/map.test.cjs` for the map's loading behavior. The map tests use Node's built-in test runner and require no npm dependencies.
+
+After generating feature data, run `node tests/map.bench.cjs` to measure polyline counts for sample Halifax views and synthetic report lookup costs. An optional argument selects a different features binary. These measurements use the Node map harness; they do not measure browser frame rates.
