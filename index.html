@@ -918,6 +918,7 @@
           // Read coordinate count.
           const coordCount = readUVarint();
           const coords = [];
+          let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
           let absLon = 0;
           let absLat = 0;
           for (let j = 0; j < coordCount; j++) {
@@ -931,9 +932,16 @@
               absLat += deltaLat;
             }
             // Leaflet expects [lat, lon].
-            coords.push([baseLat + absLat / 1000000, baseLon + absLon / 1000000]);
+            const lat = baseLat + absLat / 1000000;
+            const lon = baseLon + absLon / 1000000;
+            coords.push([lat, lon]);
+            minLon = Math.min(minLon, lon);
+            minLat = Math.min(minLat, lat);
+            maxLon = Math.max(maxLon, lon);
+            maxLat = Math.max(maxLat, lat);
           }
-          features.push({ stableID, title, priority, coords, sourceDataset, routeID });
+          const bounds = coords.length ? L.latLngBounds([minLat, minLon], [maxLat, maxLon]) : null;
+          features.push({ stableID, title, priority, coords, bounds, sourceDataset, routeID });
         }
         segments.push({ bounds: segBounds, features });
       }
@@ -1213,26 +1221,25 @@
     }
 
     /**
-     * Update which segments are rendered based on the current map viewport.
-     * If any part of a segment is visible, all its features are rendered.
+     * Keep only features near the viewport, retaining existing polylines while
+     * panning. The small margin avoids repeatedly recreating lines at the edges.
      */
     function updateVisibleFeatures() {
-      const mapBounds = map.getBounds();
+      const mapBounds = map.getBounds().pad(0.1);
+      let addedFeatures = false;
       allSegments.forEach((segment, segmentIdx) => {
         if (mapBounds.intersects(segment.bounds)) {
-          // If this segment isn’t rendered yet, add it.
-          if (!(segmentIdx in renderedSegments)) {
-            const segmentLayer = L.layerGroup();
-            let renderedFeatureCount = 0;
-            const featuresInDrawOrder = segment.features
-              .map((feature, featureIdx) => ({
-                feature,
-                featureIdx,
-                hasReport: hasReportForFeature(currentDatasetMode, segmentIdx, featureIdx)
-              }))
-              // Draw non-reported first so reported lines appear on top.
-              .sort((a, b) => Number(a.hasReport) - Number(b.hasReport));
-            featuresInDrawOrder.forEach(({ feature, featureIdx, hasReport }) => {
+          const segmentLayer = renderedSegments[segmentIdx] || L.layerGroup();
+          if (!segmentLayer.featureLayers) segmentLayer.featureLayers = new Map();
+          segment.features.forEach((feature, featureIdx) => {
+            const existing = segmentLayer.featureLayers.get(featureIdx);
+            if (!feature.bounds || !mapBounds.intersects(feature.bounds)) {
+              if (existing) {
+                segmentLayer.removeLayer(existing);
+                segmentLayer.featureLayers.delete(featureIdx);
+              }
+            } else if (!existing) {
+              const hasReport = hasReportForFeature(currentDatasetMode, segmentIdx, featureIdx);
               const color = getPriorityColor(feature.priority);
               let weight = lineWeight;
               let opacity = 0.95;
@@ -1254,12 +1261,16 @@
                  });
               polyline.featureIndex = featureIdx;
               polyline.addTo(segmentLayer);
-              renderedFeatureCount++;
-            });
-            if (renderedFeatureCount > 0) {
-              segmentLayer.addTo(featuresLayer);
-              renderedSegments[segmentIdx] = segmentLayer;
+              segmentLayer.featureLayers.set(featureIdx, polyline);
+              addedFeatures = true;
             }
+          });
+          if (segmentLayer.featureLayers.size > 0) {
+            if (!(segmentIdx in renderedSegments)) segmentLayer.addTo(featuresLayer);
+            renderedSegments[segmentIdx] = segmentLayer;
+          } else if (segmentIdx in renderedSegments) {
+            featuresLayer.removeLayer(segmentLayer);
+            delete renderedSegments[segmentIdx];
           }
         } else {
           // If the segment is not visible and is currently rendered, remove it.
@@ -1269,6 +1280,15 @@
           }
         }
       });
+      // Newly added unreported lines must not cover existing reported lines,
+      // including ones in a different segment.
+      if (addedFeatures) {
+        Object.entries(renderedSegments).forEach(([segmentIdx, group]) => {
+          group.eachLayer(polyline => {
+            if (hasReportForFeature(currentDatasetMode, segmentIdx, polyline.featureIndex)) polyline.bringToFront();
+          });
+        });
+      }
     }
 
     /**
@@ -1646,8 +1666,7 @@
         showReportsMode = enabled;
         localStorage.setItem(REPORTS_FILTER_STORAGE_KEY, enabled ? '1' : '0');
         updateReportsFilterToggle();
-        clearRenderedFeatures();
-        updateVisibleFeatures();
+        refreshRenderedFeatures();
       }
 
       async function loadDataset(mode) {

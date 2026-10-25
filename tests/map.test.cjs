@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { featureHashes, featureURLs, featureManifest, featuresResponse, jsonResponse, tick, startMap } = require('./map-harness.cjs');
+const { featureHashes, featureURLs, featureManifest, featuresResponse, geometryResponse, jsonResponse, tick, startMap } = require('./map-harness.cjs');
 
 for (const failure of ['network error', 'HTTP error', 'invalid JSON', 'pending request']) {
   test(`routes and controls initialize with event API ${failure}`, async () => {
@@ -357,4 +357,60 @@ test('report lookups do not scan report entries', async () => {
       reportsForFeature('sidewalks', 0, 0);
     }`);
   assert.equal(app.evaluate('reportKeyReads'), 0);
+});
+
+test('culls offscreen features, retains crossing lines, and reuses visible polylines on pans', async () => {
+  const app = startMap(async url => {
+    if (url === featureURLs.sidewalks) return geometryResponse([
+      [[0, 0], [0.1, 0.1]],
+      [[10, 10], [10.1, 10.1]],
+      [[-2, 0.5], [2, 0.5]],
+      []
+    ]);
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    return jsonResponse({ reports: [] });
+  });
+  app.setViewport([0, 0], [1, 1]);
+  await tick();
+  assert.equal(app.metrics.polylinesCreated, 2);
+  assert.deepEqual(Array.from(app.evaluate('renderedSegments[0].featureLayers.keys()')), [0, 2]);
+  app.evaluate('globalThis.firstLine = renderedSegments[0].featureLayers.get(0); firstLine.openPopup()');
+  app.setViewport([0.01, 0.01], [1.01, 1.01]);
+  assert.equal(app.metrics.polylinesCreated, 2);
+  assert.equal(app.evaluate('firstLine === renderedSegments[0].featureLayers.get(0) && firstLine.isPopupOpen()'), true);
+  app.setViewport([10, 10], [11, 11]);
+  assert.equal(app.metrics.polylinesCreated, 3);
+  assert.deepEqual(Array.from(app.evaluate('renderedSegments[0].featureLayers.keys()')), [1]);
+  assert.equal(app.evaluate("featureReportKey('sidewalks', 0, 1)"), 'sidewalks:0:1');
+  app.setViewport([5, 5], [6, 6]);
+  assert.equal(app.evaluate('Object.keys(renderedSegments).length'), 0);
+  app.setViewport([0, 0], [1, 1]);
+  assert.equal(app.metrics.polylinesCreated, 5);
+  assert.deepEqual(Array.from(app.evaluate('renderedSegments[0].featureLayers.keys()')), [0, 2]);
+  app.setViewport([20, 20], [21, 21]);
+  assert.equal(app.evaluate('Object.keys(renderedSegments).length'), 0);
+});
+
+test('report toggles reuse geometry and reported lines stay above newly visible lines', async () => {
+  const app = startMap(async url => {
+    if (url === featureURLs.sidewalks) return geometryResponse([
+      [[0, 0], [0.1, 0.1]],
+      [[2, 2], [2.1, 2.1]]
+    ]);
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    return jsonResponse({ reports: [{ segment_key: 'sidewalks:0:0', conditions: [] }] });
+  });
+  app.setViewport([0, 0], [1, 1]);
+  await tick();
+  assert.equal(app.metrics.polylinesCreated, 1);
+  app.setViewport([0, 0], [3, 3]);
+  assert.equal(app.metrics.polylinesCreated, 2);
+  assert.equal(app.evaluate('renderedSegments[0].featureLayers.get(0).drawOrder > renderedSegments[0].featureLayers.get(1).drawOrder'), true);
+  app.getElement('reports-filter-toggle').listeners.get('click')();
+  assert.equal(app.metrics.polylinesCreated, 2);
+  assert.equal(app.evaluate('renderedSegments[0].featureLayers.get(0).style.opacity'), 0.95);
+  assert.equal(app.evaluate('renderedSegments[0].featureLayers.get(1).style.opacity'), 0.38);
+  app.getElement('reports-filter-toggle').listeners.get('click')();
+  assert.equal(app.metrics.polylinesCreated, 2);
+  assert.equal(app.evaluate('renderedSegments[0].featureLayers.get(1).style.opacity'), 0.95);
 });

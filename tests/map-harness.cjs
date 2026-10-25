@@ -42,6 +42,37 @@ function featuresResponse(title = 'Sidewalk') {
   return { ok: true, arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.length) };
 }
 
+function geometryResponse(lines) {
+  const values = [];
+  const unsigned = value => {
+    while (value >= 128) {
+      values.push((value % 128) | 128);
+      value = Math.floor(value / 128);
+    }
+    values.push(value);
+  };
+  const signed = value => unsigned(value < 0 ? -2 * value - 1 : 2 * value);
+  const points = lines.flat();
+  unsigned(0); unsigned(0); // routes and string pieces
+  signed(Math.round(Math.min(...points.map(point => point[1])) * 1e6));
+  signed(Math.round(Math.min(...points.map(point => point[0])) * 1e6));
+  signed(Math.round(Math.max(...points.map(point => point[1])) * 1e6));
+  signed(Math.round(Math.max(...points.map(point => point[0])) * 1e6));
+  unsigned(lines.length);
+  for (const line of lines) {
+    values.push(0, 0, 1, 0, 0); // no strings, priority 1, travelways, no route
+    unsigned(line.length);
+    let lon = 0, lat = 0;
+    for (const point of line) {
+      const nextLon = Math.round(point[1] * 1e6), nextLat = Math.round(point[0] * 1e6);
+      signed(nextLon - lon); signed(nextLat - lat);
+      lon = nextLon; lat = nextLat;
+    }
+  }
+  const data = Buffer.concat([Buffer.from('SHFX\x04\x01'), Buffer.alloc(16), Buffer.from(values)]);
+  return { ok: true, arrayBuffer: async () => data.buffer.slice(data.byteOffset, data.byteOffset + data.length) };
+}
+
 const jsonResponse = payload => ({ ok: true, json: async () => payload });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -63,6 +94,11 @@ function bounds(southwest, northeast) {
     intersects(other) {
       return this.minLat <= other.maxLat && this.maxLat >= other.minLat
         && this.minLon <= other.maxLon && this.maxLon >= other.minLon;
+    },
+    pad(ratio) {
+      const lat = (this.maxLat - this.minLat) * ratio;
+      const lon = (this.maxLon - this.minLon) * ratio;
+      return bounds([this.minLat - lat, this.minLon - lon], [this.maxLat + lat, this.maxLon + lon]);
     }
   };
   if (southwest) result.extend(southwest);
@@ -106,7 +142,7 @@ function startMap(fetch, fetchManifest = async () => jsonResponse(featureManifes
   };
   const buttons = ['sidewalks', 'cycling'].map(mode => element({ mode, full: mode }));
   getElement('mobile-controls').querySelectorAll = () => buttons;
-  const metrics = { polylinesCreated: 0, styleUpdates: 0 };
+  const metrics = { polylinesCreated: 0, styleUpdates: 0, drawSequence: 0 };
   const layer = () => ({
     layers: [],
     addTo(parent) { parent.addLayer?.(this); return this; },
@@ -116,7 +152,7 @@ function startMap(fetch, fetchManifest = async () => jsonResponse(featureManifes
     eachLayer(callback) { this.layers.forEach(callback); },
     bindPopup(callback) { this.popup = callback; return this; },
     setStyle(style) { this.style = style; metrics.styleUpdates++; },
-    bringToFront() { this.front = true; },
+    bringToFront() { this.front = true; this.drawOrder = ++metrics.drawSequence; },
     isPopupOpen() { return !!this.popupOpen; },
     setPopupContent(content) { this.popupContent = content; },
     openPopup() { this.popupOpen = true; this.popupContent = this.popup(); }
@@ -157,7 +193,7 @@ function startMap(fetch, fetchManifest = async () => jsonResponse(featureManifes
       map: () => map, tileLayer: layer, layerGroup: layer,
       polyline(coords, style) {
         metrics.polylinesCreated++;
-        return Object.assign(layer(), { coords, style });
+        return Object.assign(layer(), { coords, style, drawOrder: ++metrics.drawSequence });
       },
       latLngBounds: bounds,
       control: () => ({ addTo() { this.onAdd(); } }),
@@ -184,4 +220,4 @@ function startMap(fetch, fetchManifest = async () => jsonResponse(featureManifes
 }
 
 
-module.exports = { featureHashes, featureURLs, featureManifest, featuresResponse, jsonResponse, tick, startMap };
+module.exports = { featureHashes, featureURLs, featureManifest, featuresResponse, geometryResponse, jsonResponse, tick, startMap };
