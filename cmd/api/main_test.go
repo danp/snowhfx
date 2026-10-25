@@ -333,16 +333,18 @@ func TestCurrentEventEndpoint(t *testing.T) {
 func TestWeatherRefreshAndSurfaceConditionsEndpoint(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	yesterday := now.AddDate(0, 0, -1)
 
 	if _, err := db.Exec(
 		`INSERT INTO weather_observations (observed_at, station_code, temperature_c, condition_text, raw_json, fetched_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		"2026-03-01T09:00:00Z",
+		now.Add(-5*time.Hour).Format(time.RFC3339),
 		"ahd",
 		4.0,
 		"Rain showers",
 		`{}`,
-		"2026-03-01T09:05:00Z",
+		now.Add(-5*time.Hour).Format(time.RFC3339),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -351,12 +353,12 @@ func TestWeatherRefreshAndSurfaceConditionsEndpoint(t *testing.T) {
 		switch {
 		case r.URL.Path == "/obs":
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `[{"observedAt":"Halifax Dockyard","provinceCode":"ns","climateId":"8202240","tcid":"ahd","timeStamp":"2026-03-01T14:00:00.000Z","iconCode":"29","condition":"","temperature":{"metric":"0.5"},"dewpoint":{"metric":"0.1"},"pressure":{"metric":"101.2"},"visibility":{"metric":"20"},"humidity":"94","windSpeed":{"metric":"18"},"windGust":{"metric":""},"tcId":"AHD"}]`)
-		case r.URL.Path == "/collections/climate-daily/items/8202250.2026.3.1":
+			io.WriteString(w, strings.ReplaceAll(`[{"observedAt":"Halifax Dockyard","provinceCode":"ns","climateId":"8202240","tcid":"ahd","timeStamp":"TIMESTAMP","iconCode":"29","condition":"","temperature":{"metric":"0.5"},"dewpoint":{"metric":"0.1"},"pressure":{"metric":"101.2"},"visibility":{"metric":"20"},"humidity":"94","windSpeed":{"metric":"18"},"windGust":{"metric":""},"tcId":"AHD"}]`, "TIMESTAMP", now.Add(-30*time.Minute).Format(time.RFC3339)))
+		case r.URL.Path == "/collections/climate-daily/items/8202250."+now.Format("2006.1.2"):
 			http.NotFound(w, r)
-		case r.URL.Path == "/collections/climate-daily/items/8202250.2026.2.28":
+		case r.URL.Path == "/collections/climate-daily/items/8202250."+yesterday.Format("2006.1.2"):
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"properties":{"LOCAL_DATE":"2026-02-28","MIN_TEMPERATURE":-6,"MAX_TEMPERATURE":1,"SNOW_ON_GROUND":20}}`)
+			io.WriteString(w, strings.ReplaceAll(`{"properties":{"LOCAL_DATE":"CLIMATE_DATE_VALUE","MIN_TEMPERATURE":-6,"MAX_TEMPERATURE":1,"SNOW_ON_GROUND":20}}`, "CLIMATE_DATE_VALUE", yesterday.Format("2006-01-02")))
 		default:
 			http.NotFound(w, r)
 		}
@@ -370,7 +372,7 @@ func TestWeatherRefreshAndSurfaceConditionsEndpoint(t *testing.T) {
 		observationURL: weatherTS.URL + "/obs",
 		dailyClimateID: "8202250",
 		now: func() time.Time {
-			return time.Date(2026, time.March, 1, 14, 30, 0, 0, time.UTC)
+			return now
 		},
 		dailyLookback: 3,
 	}
@@ -409,8 +411,8 @@ func TestWeatherRefreshAndSurfaceConditionsEndpoint(t *testing.T) {
 	if err := db.QueryRow(`SELECT climate_date FROM weather_daily WHERE station_code = ? ORDER BY climate_date DESC LIMIT 1`, "ahd").Scan(&climateDate); err != nil {
 		t.Fatal(err)
 	}
-	if climateDate != "2026-02-28" {
-		t.Fatalf("expected fallback daily climate_date 2026-02-28, got %q", climateDate)
+	if climateDate != yesterday.Format("2006-01-02") {
+		t.Fatalf("expected fallback daily climate_date %s, got %q", yesterday.Format("2006-01-02"), climateDate)
 	}
 }
 

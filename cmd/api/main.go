@@ -28,6 +28,8 @@ const (
 	reportTTL             = 72 * time.Hour
 	defaultWeatherStation = "yhz"
 	defaultWeatherClimate = "8202251"
+	maxObservationAge     = 2 * time.Hour
+	observationWindow     = 12 * time.Hour
 )
 
 var allowedConditions = map[string]struct{}{
@@ -78,7 +80,7 @@ type currentEventResponse struct {
 
 type weatherObservationRow struct {
 	ObservedAt    string
-	TemperatureC  float64
+	TemperatureC  sql.NullFloat64
 	ConditionText string
 	Precip1hMM    float64
 	HasPrecip1h   bool
@@ -645,6 +647,12 @@ func currentSurfaceConditions(ctx context.Context, q interface {
 	if err := json.Unmarshal([]byte(detailJSON), &res.Detail); err != nil {
 		return surfaceConditionsResponse{}, err
 	}
+	observedAt, _ := res.Detail["latest_observed_at"].(string)
+	if !observationIsRecent(time.Now().UTC(), observedAt, maxObservationAge) {
+		res = unavailableSurface(res, "Recent weather observations are unavailable.")
+	} else if res.Detail["temperature_c"] == nil {
+		res = unavailableSurface(res, "The latest weather observation has no temperature reading.")
+	}
 	return res, nil
 }
 
@@ -1036,9 +1044,6 @@ func (wr *weatherRefresher) recomputeSurface(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(observations) == 0 {
-		return nil
-	}
 	dailies, err := loadRecentDaily(ctx, wr.db, wr.stationCode, 2)
 	if err != nil {
 		return err
@@ -1081,7 +1086,7 @@ func (wr *weatherRefresher) recomputeSurface(ctx context.Context) error {
 func loadRecentObservations(ctx context.Context, db *sql.DB, stationCode string, limit int) ([]weatherObservationRow, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT observed_at, COALESCE(temperature_c, 0), COALESCE(condition_text, ''), precip_1h_mm
+		`SELECT observed_at, temperature_c, COALESCE(condition_text, ''), precip_1h_mm
 		   FROM weather_observations
 		  WHERE station_code = ?
 		  ORDER BY observed_at DESC
@@ -1152,16 +1157,64 @@ func loadRecentDaily(ctx context.Context, db *sql.DB, stationCode string, limit 
 	return result, rows.Err()
 }
 
+func observationIsRecent(now time.Time, timestamp string, maxAge time.Duration) bool {
+	observedAt, err := time.Parse(time.RFC3339Nano, timestamp)
+	return err == nil && !observedAt.Before(now.Add(-maxAge)) && !observedAt.After(now.Add(5*time.Minute))
+}
+
+func unavailableSurface(res surfaceConditionsResponse, summary string) surfaceConditionsResponse {
+	res.Status = "unavailable"
+	res.Score = 0
+	res.Tags = []string{}
+	res.Summary = summary
+	return res
+}
+
 func deriveSurfaceConditions(now time.Time, stationCode string, observations []weatherObservationRow, dailies []weatherDailyRow) surfaceConditionsResponse {
+	res := surfaceConditionsResponse{
+		ComputedAt:  now.Format(time.RFC3339),
+		StationCode: stationCode,
+		Detail: map[string]any{
+			"observation_count":   len(observations),
+			"temperature_c":       nil,
+			"temp_trend_window_c": nil,
+			"derived_at":          now.Format(time.RFC3339),
+		},
+	}
+	if len(observations) == 0 {
+		return unavailableSurface(res, "Recent weather observations are unavailable.")
+	}
 	latest := observations[len(observations)-1]
-	earliest := observations[0]
+	res.Detail["latest_observed_at"] = latest.ObservedAt
+	res.Detail["condition_text"] = latest.ConditionText
+	res.Detail["temperature_c"] = valueOrNil(latest.TemperatureC.Valid, latest.TemperatureC.Float64)
+	if !observationIsRecent(now, latest.ObservedAt, maxObservationAge) {
+		return unavailableSurface(res, "Recent weather observations are unavailable.")
+	}
+	if !latest.TemperatureC.Valid {
+		return unavailableSurface(res, "The latest weather observation has no temperature reading.")
+	}
+	temperature := latest.TemperatureC.Float64
+	var earliestTemperature float64
+	temperatureCount := 0
+	recentCount := 0
 	tempsAboveZero := 0
 	hadPrecip := false
 	sawSnowText := false
 	sawRainText := false
 	for _, obs := range observations {
-		if obs.TemperatureC > 0 {
-			tempsAboveZero++
+		if !observationIsRecent(now, obs.ObservedAt, observationWindow) {
+			continue
+		}
+		recentCount++
+		if obs.TemperatureC.Valid {
+			if temperatureCount == 0 {
+				earliestTemperature = obs.TemperatureC.Float64
+			}
+			temperatureCount++
+			if obs.TemperatureC.Float64 > 0 {
+				tempsAboveZero++
+			}
 		}
 		if obs.HasPrecip1h && obs.Precip1hMM > 0 {
 			hadPrecip = true
@@ -1194,13 +1247,14 @@ func deriveSurfaceConditions(now time.Time, stationCode string, observations []w
 		}
 	}
 
-	tempTrend := latest.TemperatureC - earliest.TemperatureC
-	nearFreezing := latest.TemperatureC >= -1 && latest.TemperatureC <= 2
-	meltingWet := snowpackKnown && snowpackCM > 0 && latest.TemperatureC > 0 && tempsAboveZero >= 1
+	tempTrend := temperature - earliestTemperature
+	trendKnown := temperatureCount >= 2
+	nearFreezing := temperature >= -1 && temperature <= 2
+	meltingWet := snowpackKnown && snowpackCM > 0 && temperature > 0 && tempsAboveZero >= 1
 	slushy := nearFreezing && (hadPrecip || sawSnowText || sawRainText)
-	flashRefreeze := meltingWet && latest.TemperatureC <= 1 && tempTrend < 0
-	icyLikely := latest.TemperatureC <= 0 && (meltingWet || (snowpackKnown && snowpackCM > 0 && tempTrend < 0))
-	packedSnow := snowpackKnown && snowpackCM > 0 && latest.TemperatureC < 0 && !hadPrecip && !meltingWet
+	flashRefreeze := meltingWet && temperature <= 1 && trendKnown && tempTrend < 0
+	icyLikely := temperature <= 0 && (meltingWet || (snowpackKnown && snowpackCM > 0 && trendKnown && tempTrend < 0))
+	packedSnow := snowpackKnown && snowpackCM > 0 && temperature < 0 && !hadPrecip && !meltingWet
 	freshSnow := sawSnowText
 
 	tags := make([]string, 0, 6)
@@ -1257,11 +1311,11 @@ func deriveSurfaceConditions(now time.Time, stationCode string, observations []w
 	}
 
 	detail := map[string]any{
-		"observation_count":      len(observations),
+		"observation_count":      recentCount,
 		"latest_observed_at":     latest.ObservedAt,
-		"temperature_c":          latest.TemperatureC,
+		"temperature_c":          temperature,
 		"condition_text":         latest.ConditionText,
-		"temp_trend_window_c":    tempTrend,
+		"temp_trend_window_c":    valueOrNil(trendKnown, tempTrend),
 		"temps_above_zero_count": tempsAboveZero,
 		"snow_on_ground_cm":      valueOrZero(snowpackKnown, snowpackCM),
 		"snowpack_known":         snowpackKnown,

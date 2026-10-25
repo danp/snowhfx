@@ -36,10 +36,13 @@ From those it derives states.
 `cmd/api` runs an API server against that same database and serves event data plus community condition reports:
 
 * `GET /api/v1/current-event`
+* `GET /api/v1/surface-conditions`
 * `GET /api/v1/community-reports?dataset_mode=...`
 * `POST /api/v1/community-reports`
 
 Reports auto-expire after 3 days, and all active reports are expired when a new weather event id is observed.
+
+Surface conditions are unavailable when the latest observation has no temperature or is more than 2 hours old. Missing temperatures remain null, and temperature trends use valid readings from the last 12 hours. Observation freshness is checked when serving cached conditions as well as when computing them.
 
 `index.html` loads `features.bin` and `features_cycling.bin` for lines to show on the map (sidewalk and cycling modes) and queries [this condensed events data](https://hrm.datasette.danp.net/snow/snowhfx) for the current weather event state and last weather event end time.
 
