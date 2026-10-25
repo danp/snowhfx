@@ -749,6 +749,7 @@
     }
 
     function formatPendingLabel(status) {
+      if (status?.state === 'unavailable') return 'Unavailable';
       if (!status) return 'Pending';
       const parts = [];
       const updateStamp = formatRelativeTimestamp(status.updateTime);
@@ -772,7 +773,7 @@
 
     function formatDeadlineParts(deadline, status) {
       if (!deadline) {
-        return { date: 'Pending', time: '' };
+        return { date: status?.state === 'unavailable' ? 'Unavailable' : 'Pending', time: '' };
       }
       const d = new Date(deadline);
       if (!Number.isFinite(d.getTime())) {
@@ -1173,7 +1174,7 @@
       return `
         ${feature.title || 'Unknown'}<br>
         <strong>Priority:</strong> ${feature.priority} (${sourceLabelHtml})<br>
-        <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline)} (${priorityDetails.Timeline} h)<br>
+        <strong>Deadline:</strong> ${formatDeadline(priorityDetails.Deadline, currentEventSummary)} (${priorityDetails.Timeline} h)<br>
         ${routeLabel ? `<strong>Route:</strong> ${routeLabel}<br>` : ''}
         ${sameSourceAndData ? '' : (featureLink ? `<strong>Data:</strong> <a href="${featureLink}" target="_blank" rel="noopener">${featureLabel}</a><br>` : `<strong>Data:</strong> ${featureLabel}<br>`)}
         <button type="button" class="popup-community-button" data-seg="${segmentIdx}" data-feature="${featureIdx}">Report conditions</button>
@@ -1296,528 +1297,536 @@
       }
     }
 
-    // Load priority/timeline data.
-    fetch(CURRENT_EVENT_API_ENDPOINT)
-      .then(response => response.json())
-      .then(async (data) => {
-        let state = data.state;
-        let maxEndTime = data.max_end_time;
-        currentEventSummary = {
-          state,
-          updateTime: data.update_time || '',
-          serviceUpdate: data.service_update || ''
-        };
-        if (state === "active") {
-          maxEndTime = null;
-        }
-        const endTime = maxEndTime ? new Date(maxEndTime) : null;
-        function calculateDeadline(hours) {
-          if (!endTime) return null;
-          return new Date(endTime.getTime() + (hours * 3600 * 1000));
-        }
-        const priorities = {
-          1: { Timeline: 12, Deadline: calculateDeadline(12) },
-          2: { Timeline: 18, Deadline: calculateDeadline(18) },
-          3: { Timeline: 36, Deadline: calculateDeadline(36) }
-        };
-        // Make priorities available globally.
-        window.priorities = priorities;
-        // Update the header with priority details.
-        const prioritiesHeader = document.getElementById('priorities-header');
-        const priorityItemsHtml = Object.entries(priorities)
-          .map(([priority, details]) => {
-            const deadlineParts = formatDeadlineParts(details.Deadline, currentEventSummary);
-            return `
-              <div class="priority-item priority-${priority}">
-                <div class="priority-square">${priority}</div>
-                <div class="priority-deadline">
-                  <span class="priority-deadline-date">${deadlineParts.date}</span>
-                  ${deadlineParts.time ? `<span class="priority-deadline-time">${deadlineParts.time}</span>` : ''}
-                </div>
+    function updateEvent(data) {
+      let state = data ? data.state : 'unavailable';
+      let maxEndTime = data ? data.max_end_time : null;
+      currentEventSummary = {
+        state,
+        updateTime: data?.update_time || '',
+        serviceUpdate: data?.service_update || ''
+      };
+      if (state === "active") {
+        maxEndTime = null;
+      }
+      const endTime = maxEndTime ? new Date(maxEndTime) : null;
+      function calculateDeadline(hours) {
+        if (!endTime) return null;
+        return new Date(endTime.getTime() + (hours * 3600 * 1000));
+      }
+      const priorities = {
+        1: { Timeline: 12, Deadline: calculateDeadline(12) },
+        2: { Timeline: 18, Deadline: calculateDeadline(18) },
+        3: { Timeline: 36, Deadline: calculateDeadline(36) }
+      };
+      // Make priorities available globally.
+      window.priorities = priorities;
+      // Update the header with priority details.
+      const prioritiesHeader = document.getElementById('priorities-header');
+      const priorityItemsHtml = Object.entries(priorities)
+        .map(([priority, details]) => {
+          const deadlineParts = formatDeadlineParts(details.Deadline, currentEventSummary);
+          return `
+            <div class="priority-item priority-${priority}">
+              <div class="priority-square">${priority}</div>
+              <div class="priority-deadline">
+                <span class="priority-deadline-date">${deadlineParts.date}</span>
+                ${deadlineParts.time ? `<span class="priority-deadline-time">${deadlineParts.time}</span>` : ''}
               </div>
-            `;
-          })
-          .join('');
-        const statusTime = formatRelativeTimestamp(currentEventSummary.updateTime);
-        const statusText = (currentEventSummary.serviceUpdate || '').trim();
-        const showEventStatus = state === "active" && (statusTime || statusText);
-        prioritiesHeader.innerHTML = priorityItemsHtml;
-        if (!showEventStatus && eventStatusPanel.classList.contains('is-open')) {
+            </div>
+          `;
+        })
+        .join('');
+      const statusTime = formatRelativeTimestamp(currentEventSummary.updateTime);
+      const statusText = (currentEventSummary.serviceUpdate || '').trim();
+      const showEventStatus = state === "active" && (statusTime || statusText);
+      prioritiesHeader.innerHTML = priorityItemsHtml;
+      if (!showEventStatus && eventStatusPanel.classList.contains('is-open')) {
+        setEventStatusOpen(false);
+      }
+      eventStatusToggle.hidden = !showEventStatus;
+      if (showEventStatus) {
+        eventStatusTime.textContent = statusTime ? `Updated ${statusTime}` : 'Latest update available';
+        eventStatusText.textContent = statusText || 'No additional details available.';
+        eventStatusToggle.title = statusTime ? `Latest update: ${statusTime}` : 'Latest update available';
+      } else {
+        eventStatusTime.textContent = '';
+        eventStatusText.textContent = '';
+        eventStatusToggle.title = '';
+      }
+    }
+
+    function setEventStatusOpen(isOpen) {
+      eventStatusPanel.classList.toggle('is-open', isOpen);
+      eventStatusPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+      eventStatusToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+      if (isOpen) {
+        eventStatusClose.focus();
+      } else {
+        eventStatusToggle.focus();
+      }
+    }
+
+    async function initializeMap() {
+      const mobileControls = document.getElementById('mobile-controls');
+      const quickButtons = mobileControls.querySelectorAll('button[data-mode]');
+      const aboutToggle = document.getElementById('about-toggle');
+      const reportsFilterToggle = document.getElementById('reports-filter-toggle');
+      const aboutPanel = document.getElementById('about-panel');
+      const aboutClose = document.getElementById('about-close');
+      const reportPanel = document.getElementById('report-panel');
+      const reportClose = document.getElementById('report-close');
+      const reportNotes = document.getElementById('report-notes');
+      const reportEmailBody = document.getElementById('report-email-body');
+      const reportEmailLink = document.getElementById('report-email-link');
+      const reportCopyBody = document.getElementById('report-copy-body');
+      const reportStatusMessage = document.getElementById('report-status-message');
+      const communityReportPanel = document.getElementById('community-report-panel');
+      const communityReportClose = document.getElementById('community-report-close');
+      const communityReportSave = document.getElementById('community-report-save');
+      const communityReportNotes = document.getElementById('community-report-notes');
+      const communityReportFeature = document.getElementById('community-report-feature');
+      const communityReportStatus = document.getElementById('community-report-status');
+      const communityReporterIdLabel = document.getElementById('community-reporter-id');
+      const communityConditionInputs = Array.from(document.querySelectorAll('input[name="community-condition"]'));
+      let reportFeature = null;
+      let reportStreetText = 'Unnamed segment';
+      let reportTravelwayType = 'Travelway';
+      let reportRouteText = 'Not matched';
+      let reportDatasetUrl = 'Not available';
+      let communityReportContext = null;
+      const datasetConfig = {
+        sidewalks: { url: 'features.bin', datasetCode: 0 },
+        cycling: { url: 'features_cycling.bin', datasetCode: 1 }
+      };
+      const storedDataset = localStorage.getItem('datasetMode');
+      const initialDataset = datasetConfig[storedDataset] ? storedDataset : 'sidewalks';
+      const reporterId = getOrCreateReporterId();
+      const reporterSecret = getOrCreateReporterSecret();
+      communityReporterIdLabel.textContent = `Reporter ID: ${reporterId}`;
+
+      async function refreshCommunityReports() {
+        try {
+          await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+        } catch (error) {
+          console.error('Unable to load community reports', error);
+          communityReports = [];
+        }
+        clearRenderedFeatures();
+        updateVisibleFeatures();
+      }
+
+      function updateQuickToggle(mode) {
+        quickButtons.forEach(button => {
+          const active = button.dataset.mode === mode;
+          button.classList.toggle('is-active', active);
+          button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+      }
+
+      function updateQuickLabels() {
+        quickButtons.forEach(button => {
+          button.textContent = button.dataset.full;
+        });
+      }
+
+      function addLocationControl() {
+        const control = L.control({ position: 'topleft' });
+        let resetTimer = null;
+
+        control.onAdd = function() {
+          const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-locate');
+          const button = L.DomUtil.create('a', '', container);
+          button.href = '#';
+          button.setAttribute('role', 'button');
+          button.setAttribute('aria-label', 'Center map to my location');
+          button.setAttribute('title', 'Center to my location');
+          button.innerHTML = '&#9678;';
+
+          const setButtonState = (label, title, className) => {
+            if (resetTimer) {
+              clearTimeout(resetTimer);
+              resetTimer = null;
+            }
+            button.innerHTML = label;
+            button.setAttribute('title', title);
+            button.classList.remove('is-loading', 'is-disabled');
+            if (className) {
+              button.classList.add(className);
+            }
+          };
+
+          const queueReset = (label, title, className) => {
+            setButtonState(label, title, className);
+            resetTimer = window.setTimeout(() => {
+              resetTimer = null;
+              setButtonState('&#9678;', 'Center to my location');
+            }, 2200);
+          };
+
+          if (!navigator.geolocation) {
+            setButtonState('!', 'Location unavailable', 'is-disabled');
+          } else {
+            L.DomEvent.on(button, 'click', (event) => {
+              L.DomEvent.stop(event);
+              if (button.classList.contains('is-loading')) {
+                return;
+              }
+              setButtonState('...', 'Locating...', 'is-loading');
+              navigator.geolocation.getCurrentPosition(
+                (position) => {
+                  const coords = [position.coords.latitude, position.coords.longitude];
+                  map.setView(coords, Math.max(map.getZoom(), 16));
+                  saveMapState(map);
+                  queueReset('&#10003;', 'Centered on your location');
+                },
+                () => {
+                  queueReset('!', 'Unable to determine your location');
+                },
+                {
+                  enableHighAccuracy: true,
+                  timeout: 10000,
+                  maximumAge: 60000
+                }
+              );
+            });
+          }
+
+          L.DomEvent.disableClickPropagation(container);
+          L.DomEvent.disableScrollPropagation(container);
+          return container;
+        };
+
+        control.addTo(map);
+      }
+
+      function updateReportsFilterToggle() {
+        reportsFilterToggle.classList.toggle('is-active', showReportsMode);
+        reportsFilterToggle.setAttribute('aria-pressed', showReportsMode ? 'true' : 'false');
+        reportsFilterToggle.textContent = 'Reports';
+      }
+
+      function setReportsMode(enabled) {
+        showReportsMode = enabled;
+        localStorage.setItem(REPORTS_FILTER_STORAGE_KEY, enabled ? '1' : '0');
+        updateReportsFilterToggle();
+        clearRenderedFeatures();
+        updateVisibleFeatures();
+      }
+
+      async function loadDataset(mode) {
+        const config = datasetConfig[mode];
+        if (!config) {
+          console.error("Unknown dataset:", mode);
+          return;
+        }
+        currentDatasetMode = mode;
+        currentDatasetCode = config.datasetCode;
+        resetRenderedFeatures();
+        const isInitialLoad = !hasLoadedDataset;
+        const fitBounds = !savedState && isInitialLoad;
+        const preserveView = !isInitialLoad;
+        hasLoadedDataset = true;
+        await loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
+        await refreshCommunityReports();
+        updateQuickToggle(mode);
+      }
+
+      quickButtons.forEach(button => {
+        button.addEventListener('click', async () => {
+          const mode = button.dataset.mode;
+          localStorage.setItem('datasetMode', mode);
+          await loadDataset(mode);
+        });
+      });
+      addLocationControl();
+      reportsFilterToggle.addEventListener('click', () => {
+        setReportsMode(!showReportsMode);
+      });
+      updateQuickLabels();
+      updateReportsFilterToggle();
+      window.addEventListener('resize', updateQuickLabels);
+
+      function setAboutOpen(isOpen) {
+        aboutPanel.classList.toggle('is-open', isOpen);
+        aboutPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+        aboutToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        if (isOpen) {
+          aboutClose.focus();
+        } else {
+          aboutToggle.focus();
+        }
+      }
+
+      aboutToggle.addEventListener('click', () => setAboutOpen(true));
+      aboutClose.addEventListener('click', () => setAboutOpen(false));
+      aboutPanel.addEventListener('click', (event) => {
+        if (event.target === aboutPanel) {
+          setAboutOpen(false);
+        }
+      });
+      eventStatusToggle.addEventListener('click', () => setEventStatusOpen(true));
+      eventStatusClose.addEventListener('click', () => setEventStatusOpen(false));
+      eventStatusPanel.addEventListener('click', (event) => {
+        if (event.target === eventStatusPanel) {
           setEventStatusOpen(false);
         }
-        eventStatusToggle.hidden = !showEventStatus;
-        if (showEventStatus) {
-          eventStatusTime.textContent = statusTime ? `Updated ${statusTime}` : 'Latest update available';
-          eventStatusText.textContent = statusText || 'No additional details available.';
-          eventStatusToggle.title = statusTime ? `Latest update: ${statusTime}` : 'Latest update available';
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && aboutPanel.classList.contains('is-open')) {
+          setAboutOpen(false);
+        }
+        if (event.key === 'Escape' && eventStatusPanel.classList.contains('is-open')) {
+          setEventStatusOpen(false);
+        }
+      });
+
+      function setReportOpen(isOpen) {
+        reportPanel.classList.toggle('is-open', isOpen);
+        reportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+        if (isOpen) {
+          reportStatusMessage.textContent = '';
+          reportClose.focus();
         } else {
-          eventStatusTime.textContent = '';
-          eventStatusText.textContent = '';
-          eventStatusToggle.title = '';
-        }
-        const mobileControls = document.getElementById('mobile-controls');
-        const quickButtons = mobileControls.querySelectorAll('button[data-mode]');
-        const aboutToggle = document.getElementById('about-toggle');
-        const reportsFilterToggle = document.getElementById('reports-filter-toggle');
-        const aboutPanel = document.getElementById('about-panel');
-        const aboutClose = document.getElementById('about-close');
-        const reportPanel = document.getElementById('report-panel');
-        const reportClose = document.getElementById('report-close');
-        const reportNotes = document.getElementById('report-notes');
-        const reportEmailBody = document.getElementById('report-email-body');
-        const reportEmailLink = document.getElementById('report-email-link');
-        const reportCopyBody = document.getElementById('report-copy-body');
-        const reportStatusMessage = document.getElementById('report-status-message');
-        const communityReportPanel = document.getElementById('community-report-panel');
-        const communityReportClose = document.getElementById('community-report-close');
-        const communityReportSave = document.getElementById('community-report-save');
-        const communityReportNotes = document.getElementById('community-report-notes');
-        const communityReportFeature = document.getElementById('community-report-feature');
-        const communityReportStatus = document.getElementById('community-report-status');
-        const communityReporterIdLabel = document.getElementById('community-reporter-id');
-        const communityConditionInputs = Array.from(document.querySelectorAll('input[name="community-condition"]'));
-        let reportFeature = null;
-        let reportStreetText = 'Unnamed segment';
-        let reportTravelwayType = 'Travelway';
-        let reportRouteText = 'Not matched';
-        let reportDatasetUrl = 'Not available';
-        let communityReportContext = null;
-        const datasetConfig = {
-          sidewalks: { url: 'features.bin', datasetCode: 0 },
-          cycling: { url: 'features_cycling.bin', datasetCode: 1 }
-        };
-        const storedDataset = localStorage.getItem('datasetMode');
-        const initialDataset = datasetConfig[storedDataset] ? storedDataset : 'sidewalks';
-        const reporterId = getOrCreateReporterId();
-        const reporterSecret = getOrCreateReporterSecret();
-        communityReporterIdLabel.textContent = `Reporter ID: ${reporterId}`;
-
-        async function refreshCommunityReports() {
-          try {
-            await reportsApi.listReports({ dataset_mode: currentDatasetMode });
-          } catch (error) {
-            console.error('Unable to load community reports', error);
-            communityReports = [];
-          }
-          clearRenderedFeatures();
-          updateVisibleFeatures();
-        }
-
-        function updateQuickToggle(mode) {
-          quickButtons.forEach(button => {
-            const active = button.dataset.mode === mode;
-            button.classList.toggle('is-active', active);
-            button.setAttribute('aria-pressed', active ? 'true' : 'false');
-          });
-        }
-
-        function updateQuickLabels() {
-          quickButtons.forEach(button => {
-            button.textContent = button.dataset.full;
-          });
-        }
-
-        function addLocationControl() {
-          const control = L.control({ position: 'topleft' });
-          let resetTimer = null;
-
-          control.onAdd = function() {
-            const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-locate');
-            const button = L.DomUtil.create('a', '', container);
-            button.href = '#';
-            button.setAttribute('role', 'button');
-            button.setAttribute('aria-label', 'Center map to my location');
-            button.setAttribute('title', 'Center to my location');
-            button.innerHTML = '&#9678;';
-
-            const setButtonState = (label, title, className) => {
-              if (resetTimer) {
-                clearTimeout(resetTimer);
-                resetTimer = null;
-              }
-              button.innerHTML = label;
-              button.setAttribute('title', title);
-              button.classList.remove('is-loading', 'is-disabled');
-              if (className) {
-                button.classList.add(className);
-              }
-            };
-
-            const queueReset = (label, title, className) => {
-              setButtonState(label, title, className);
-              resetTimer = window.setTimeout(() => {
-                resetTimer = null;
-                setButtonState('&#9678;', 'Center to my location');
-              }, 2200);
-            };
-
-            if (!navigator.geolocation) {
-              setButtonState('!', 'Location unavailable', 'is-disabled');
-            } else {
-              L.DomEvent.on(button, 'click', (event) => {
-                L.DomEvent.stop(event);
-                if (button.classList.contains('is-loading')) {
-                  return;
-                }
-                setButtonState('...', 'Locating...', 'is-loading');
-                navigator.geolocation.getCurrentPosition(
-                  (position) => {
-                    const coords = [position.coords.latitude, position.coords.longitude];
-                    map.setView(coords, Math.max(map.getZoom(), 16));
-                    saveMapState(map);
-                    queueReset('&#10003;', 'Centered on your location');
-                  },
-                  () => {
-                    queueReset('!', 'Unable to determine your location');
-                  },
-                  {
-                    enableHighAccuracy: true,
-                    timeout: 10000,
-                    maximumAge: 60000
-                  }
-                );
-              });
-            }
-
-            L.DomEvent.disableClickPropagation(container);
-            L.DomEvent.disableScrollPropagation(container);
-            return container;
-          };
-
-          control.addTo(map);
-        }
-
-        function updateReportsFilterToggle() {
-          reportsFilterToggle.classList.toggle('is-active', showReportsMode);
-          reportsFilterToggle.setAttribute('aria-pressed', showReportsMode ? 'true' : 'false');
-          reportsFilterToggle.textContent = 'Reports';
-        }
-
-        function setReportsMode(enabled) {
-          showReportsMode = enabled;
-          localStorage.setItem(REPORTS_FILTER_STORAGE_KEY, enabled ? '1' : '0');
-          updateReportsFilterToggle();
-          clearRenderedFeatures();
-          updateVisibleFeatures();
-        }
-
-        async function loadDataset(mode) {
-          const config = datasetConfig[mode];
-          if (!config) {
-            console.error("Unknown dataset:", mode);
-            return;
-          }
-          currentDatasetMode = mode;
-          currentDatasetCode = config.datasetCode;
-          resetRenderedFeatures();
-          const isInitialLoad = !hasLoadedDataset;
-          const fitBounds = !savedState && isInitialLoad;
-          const preserveView = !isInitialLoad;
-          hasLoadedDataset = true;
-          await loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
-          await refreshCommunityReports();
-          updateQuickToggle(mode);
-        }
-
-        quickButtons.forEach(button => {
-          button.addEventListener('click', async () => {
-            const mode = button.dataset.mode;
-            localStorage.setItem('datasetMode', mode);
-            await loadDataset(mode);
-          });
-        });
-        addLocationControl();
-        reportsFilterToggle.addEventListener('click', () => {
-          setReportsMode(!showReportsMode);
-        });
-        updateQuickLabels();
-        updateReportsFilterToggle();
-        window.addEventListener('resize', updateQuickLabels);
-
-        // Load and render the initial dataset.
-        await loadDataset(initialDataset);
-
-        function setAboutOpen(isOpen) {
-          aboutPanel.classList.toggle('is-open', isOpen);
-          aboutPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-          aboutToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-          if (isOpen) {
-            aboutClose.focus();
-          } else {
-            aboutToggle.focus();
-          }
-        }
-
-        function setEventStatusOpen(isOpen) {
-          eventStatusPanel.classList.toggle('is-open', isOpen);
-          eventStatusPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-          eventStatusToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-          if (isOpen) {
-            eventStatusClose.focus();
-          } else {
-            eventStatusToggle.focus();
-          }
-        }
-
-        aboutToggle.addEventListener('click', () => setAboutOpen(true));
-        aboutClose.addEventListener('click', () => setAboutOpen(false));
-        aboutPanel.addEventListener('click', (event) => {
-          if (event.target === aboutPanel) {
-            setAboutOpen(false);
-          }
-        });
-        eventStatusToggle.addEventListener('click', () => setEventStatusOpen(true));
-        eventStatusClose.addEventListener('click', () => setEventStatusOpen(false));
-        eventStatusPanel.addEventListener('click', (event) => {
-          if (event.target === eventStatusPanel) {
-            setEventStatusOpen(false);
-          }
-        });
-        document.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape' && aboutPanel.classList.contains('is-open')) {
-            setAboutOpen(false);
-          }
-          if (event.key === 'Escape' && eventStatusPanel.classList.contains('is-open')) {
-            setEventStatusOpen(false);
-          }
-        });
-
-        function setReportOpen(isOpen) {
-          reportPanel.classList.toggle('is-open', isOpen);
-          reportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-          if (isOpen) {
-            reportStatusMessage.textContent = '';
-            reportClose.focus();
-          } else {
-            reportNotes.value = '';
-            reportFeature = null;
-            reportStreetText = 'Unnamed segment';
-            reportTravelwayType = 'Travelway';
-            reportRouteText = 'Not matched';
-            reportDatasetUrl = 'Not available';
-          }
-        }
-
-        function setCommunityReportOpen(isOpen) {
-          communityReportPanel.classList.toggle('is-open', isOpen);
-          communityReportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
-          if (isOpen) {
-            communityReportStatus.textContent = '';
-            communityReportSave.focus();
-          } else {
-            communityReportNotes.value = '';
-            communityReportFeature.textContent = '';
-            communityConditionInputs.forEach((input) => {
-              input.checked = false;
-            });
-            communityReportContext = null;
-          }
-        }
-
-        function setCommunityReportFromFeature(segmentIdx, featureIdx) {
-          const segment = allSegments[segmentIdx];
-          if (!segment || !segment.features || !segment.features[featureIdx]) {
-            return;
-          }
-          const feature = segment.features[featureIdx];
-          const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
-          communityReportContext = {
-            dataset_mode: currentDatasetMode,
-            segment_idx: segmentIdx,
-            feature_idx: featureIdx,
-            segment_key: featureReportKey(currentDatasetMode, segmentIdx, featureIdx),
-            title: feature.title || 'Unnamed segment',
-            priority: feature.priority,
-            route: routeLabel
-          };
-          const modeLabel = communityReportContext.dataset_mode === 'cycling' ? 'cycling' : 'sidewalk';
-          communityReportFeature.textContent = `${communityReportContext.title}, ${modeLabel}`;
-        }
-
-        reportClose.addEventListener('click', () => setReportOpen(false));
-        reportPanel.addEventListener('click', (event) => {
-          if (event.target === reportPanel) {
-            setReportOpen(false);
-          }
-        });
-        communityReportClose.addEventListener('click', () => setCommunityReportOpen(false));
-        communityReportPanel.addEventListener('click', (event) => {
-          if (event.target === communityReportPanel) {
-            setCommunityReportOpen(false);
-          }
-        });
-        document.addEventListener('click', (event) => {
-          const button = event.target.closest('.popup-311-button');
-          if (!button) {
-            return;
-          }
-          const segmentIdx = Number(button.dataset.seg);
-          const featureIdx = Number(button.dataset.feature);
-          const segment = allSegments[segmentIdx];
-          if (!segment || !segment.features || !segment.features[featureIdx]) {
-            return;
-          }
-          if (reportActions.openFromFeature) {
-            reportActions.openFromFeature(segment.features[featureIdx]);
-          }
-          event.preventDefault();
-          event.stopPropagation();
-        });
-        document.addEventListener('click', (event) => {
-          const button = event.target.closest('.popup-community-button');
-          if (!button) {
-            return;
-          }
-          const segmentIdx = Number(button.dataset.seg);
-          const featureIdx = Number(button.dataset.feature);
-          if (reportActions.openCommunityFromIndices) {
-            reportActions.openCommunityFromIndices(segmentIdx, featureIdx);
-          }
-          event.preventDefault();
-          event.stopPropagation();
-        });
-        document.addEventListener('keydown', (event) => {
-          if (event.key !== 'Escape') {
-            return;
-          }
-          if (reportPanel.classList.contains('is-open')) {
-            setReportOpen(false);
-          }
-          if (communityReportPanel.classList.contains('is-open')) {
-            setCommunityReportOpen(false);
-          }
-        });
-        function updateReportEmailDraft() {
-          if (!reportFeature) {
-            return;
-          }
-          reportStatusMessage.textContent = '';
-          const street = reportStreetText;
-          const travelwayType = reportTravelwayType;
-          const routeLabel = reportRouteText;
-          const datasetUrl = reportDatasetUrl;
-          const note = reportNotes.value.trim();
-          const lines = [
-            'Hello 311,',
-            '',
-            'I am reporting a snow issue for:',
-            '',
-            `${travelwayType}: ${street}`,
-            '',
-            `Winter route: ${routeLabel}`,
-            '',
-            `Open Data map location: ${datasetUrl}`
-          ];
-          if (note) {
-            lines.push('', `Note: ${note}`);
-          }
-          const body = lines.join('\n');
-          const subject = `Snow clearing - ${street}`;
-          reportEmailBody.textContent = body;
-          reportEmailLink.href = `mailto:contactus@311.halifax.ca?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-        }
-
-        function setReportFromFeature(feature) {
-          reportFeature = feature;
-          reportStatusMessage.textContent = '';
-          const street = feature.title || 'Unnamed segment';
-          const travelwayType = travelwayTypeForFeature(feature);
-          const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
-          reportStreetText = street;
-          reportTravelwayType = travelwayType;
-          reportRouteText = routeLabel;
-          const midpoint = featureMidpoint(feature.coords);
-          const datasetUrl = datasetExploreUrl(currentDatasetCode, midpoint);
-          reportDatasetUrl = datasetUrl || 'Not available';
           reportNotes.value = '';
-          updateReportEmailDraft();
+          reportFeature = null;
+          reportStreetText = 'Unnamed segment';
+          reportTravelwayType = 'Travelway';
+          reportRouteText = 'Not matched';
+          reportDatasetUrl = 'Not available';
         }
+      }
 
-        reportNotes.addEventListener('input', updateReportEmailDraft);
-        reportCopyBody.addEventListener('click', async () => {
-          reportStatusMessage.textContent = '';
-          const text = reportEmailBody.textContent;
-          if (!text) {
-            reportStatusMessage.textContent = 'Nothing to copy yet.';
+      function setCommunityReportOpen(isOpen) {
+        communityReportPanel.classList.toggle('is-open', isOpen);
+        communityReportPanel.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+        if (isOpen) {
+          communityReportStatus.textContent = '';
+          communityReportSave.focus();
+        } else {
+          communityReportNotes.value = '';
+          communityReportFeature.textContent = '';
+          communityConditionInputs.forEach((input) => {
+            input.checked = false;
+          });
+          communityReportContext = null;
+        }
+      }
+
+      function setCommunityReportFromFeature(segmentIdx, featureIdx) {
+        const segment = allSegments[segmentIdx];
+        if (!segment || !segment.features || !segment.features[featureIdx]) {
+          return;
+        }
+        const feature = segment.features[featureIdx];
+        const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
+        communityReportContext = {
+          dataset_mode: currentDatasetMode,
+          segment_idx: segmentIdx,
+          feature_idx: featureIdx,
+          segment_key: featureReportKey(currentDatasetMode, segmentIdx, featureIdx),
+          title: feature.title || 'Unnamed segment',
+          priority: feature.priority,
+          route: routeLabel
+        };
+        const modeLabel = communityReportContext.dataset_mode === 'cycling' ? 'cycling' : 'sidewalk';
+        communityReportFeature.textContent = `${communityReportContext.title}, ${modeLabel}`;
+      }
+
+      reportClose.addEventListener('click', () => setReportOpen(false));
+      reportPanel.addEventListener('click', (event) => {
+        if (event.target === reportPanel) {
+          setReportOpen(false);
+        }
+      });
+      communityReportClose.addEventListener('click', () => setCommunityReportOpen(false));
+      communityReportPanel.addEventListener('click', (event) => {
+        if (event.target === communityReportPanel) {
+          setCommunityReportOpen(false);
+        }
+      });
+      document.addEventListener('click', (event) => {
+        const button = event.target.closest('.popup-311-button');
+        if (!button) {
+          return;
+        }
+        const segmentIdx = Number(button.dataset.seg);
+        const featureIdx = Number(button.dataset.feature);
+        const segment = allSegments[segmentIdx];
+        if (!segment || !segment.features || !segment.features[featureIdx]) {
+          return;
+        }
+        if (reportActions.openFromFeature) {
+          reportActions.openFromFeature(segment.features[featureIdx]);
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      document.addEventListener('click', (event) => {
+        const button = event.target.closest('.popup-community-button');
+        if (!button) {
+          return;
+        }
+        const segmentIdx = Number(button.dataset.seg);
+        const featureIdx = Number(button.dataset.feature);
+        if (reportActions.openCommunityFromIndices) {
+          reportActions.openCommunityFromIndices(segmentIdx, featureIdx);
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') {
+          return;
+        }
+        if (reportPanel.classList.contains('is-open')) {
+          setReportOpen(false);
+        }
+        if (communityReportPanel.classList.contains('is-open')) {
+          setCommunityReportOpen(false);
+        }
+      });
+      function updateReportEmailDraft() {
+        if (!reportFeature) {
+          return;
+        }
+        reportStatusMessage.textContent = '';
+        const street = reportStreetText;
+        const travelwayType = reportTravelwayType;
+        const routeLabel = reportRouteText;
+        const datasetUrl = reportDatasetUrl;
+        const note = reportNotes.value.trim();
+        const lines = [
+          'Hello 311,',
+          '',
+          'I am reporting a snow issue for:',
+          '',
+          `${travelwayType}: ${street}`,
+          '',
+          `Winter route: ${routeLabel}`,
+          '',
+          `Open Data map location: ${datasetUrl}`
+        ];
+        if (note) {
+          lines.push('', `Note: ${note}`);
+        }
+        const body = lines.join('\n');
+        const subject = `Snow clearing - ${street}`;
+        reportEmailBody.textContent = body;
+        reportEmailLink.href = `mailto:contactus@311.halifax.ca?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+      }
+
+      function setReportFromFeature(feature) {
+        reportFeature = feature;
+        reportStatusMessage.textContent = '';
+        const street = feature.title || 'Unnamed segment';
+        const travelwayType = travelwayTypeForFeature(feature);
+        const routeLabel = feature.routeID ? (getRouteLabel(feature.routeID) || 'Not matched') : 'Not matched';
+        reportStreetText = street;
+        reportTravelwayType = travelwayType;
+        reportRouteText = routeLabel;
+        const midpoint = featureMidpoint(feature.coords);
+        const datasetUrl = datasetExploreUrl(currentDatasetCode, midpoint);
+        reportDatasetUrl = datasetUrl || 'Not available';
+        reportNotes.value = '';
+        updateReportEmailDraft();
+      }
+
+      reportNotes.addEventListener('input', updateReportEmailDraft);
+      reportCopyBody.addEventListener('click', async () => {
+        reportStatusMessage.textContent = '';
+        const text = reportEmailBody.textContent;
+        if (!text) {
+          reportStatusMessage.textContent = 'Nothing to copy yet.';
+          return;
+        }
+        const fallbackCopy = () => {
+          const temp = document.createElement('textarea');
+          temp.value = text;
+          temp.setAttribute('readonly', '');
+          temp.style.position = 'fixed';
+          temp.style.top = '0';
+          temp.style.left = '0';
+          temp.style.width = '1px';
+          temp.style.height = '1px';
+          temp.style.opacity = '0';
+          temp.style.fontSize = '16px';
+          document.body.appendChild(temp);
+          temp.select();
+          temp.setSelectionRange(0, text.length);
+          const ok = document.execCommand('copy');
+          document.body.removeChild(temp);
+          return ok;
+        };
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            reportStatusMessage.textContent = 'Copied email body.';
             return;
           }
-          const fallbackCopy = () => {
-            const temp = document.createElement('textarea');
-            temp.value = text;
-            temp.setAttribute('readonly', '');
-            temp.style.position = 'fixed';
-            temp.style.top = '0';
-            temp.style.left = '0';
-            temp.style.width = '1px';
-            temp.style.height = '1px';
-            temp.style.opacity = '0';
-            temp.style.fontSize = '16px';
-            document.body.appendChild(temp);
-            temp.select();
-            temp.setSelectionRange(0, text.length);
-            const ok = document.execCommand('copy');
-            document.body.removeChild(temp);
-            return ok;
-          };
-          try {
-            if (navigator.clipboard && window.isSecureContext) {
-              await navigator.clipboard.writeText(text);
-              reportStatusMessage.textContent = 'Copied email body.';
-              return;
-            }
-            if (fallbackCopy()) {
-              reportStatusMessage.textContent = 'Copied email body.';
-            } else {
-              reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
-            }
-          } catch (error) {
-            console.error('Unable to copy email body', error);
+          if (fallbackCopy()) {
+            reportStatusMessage.textContent = 'Copied email body.';
+          } else {
             reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
           }
-        });
-        communityReportSave.addEventListener('click', async () => {
-          communityReportStatus.textContent = '';
-          if (!communityReportContext) {
-            communityReportStatus.textContent = 'No segment selected.';
-            return;
-          }
-          const conditions = communityConditionInputs
-            .filter((input) => input.checked)
-            .map((input) => input.value);
-          const report = {
-            segment_key: communityReportContext.segment_key,
-            dataset_mode: communityReportContext.dataset_mode,
-            title: communityReportContext.title,
-            priority: communityReportContext.priority,
-            route: communityReportContext.route,
-            conditions,
-            notes: communityReportNotes.value.trim(),
-            reporter_id: reporterId,
-            reporter_secret: reporterSecret
-          };
-          communityReportSave.disabled = true;
-          try {
-            await reportsApi.createReport(report);
-            await refreshCommunityReports();
-            communityReportStatus.textContent = 'Saved.';
-            map.closePopup();
-            setCommunityReportOpen(false);
-          } catch (error) {
-            console.error('Unable to save community report', error);
-            communityReportStatus.textContent = 'Unable to save report right now.';
-          } finally {
-            communityReportSave.disabled = false;
-          }
-        });
-        reportActions.openFromFeature = (feature) => {
-          setReportFromFeature(feature);
-          setReportOpen(true);
+        } catch (error) {
+          console.error('Unable to copy email body', error);
+          reportStatusMessage.textContent = 'Copy failed. You can select and copy the text.';
+        }
+      });
+      communityReportSave.addEventListener('click', async () => {
+        communityReportStatus.textContent = '';
+        if (!communityReportContext) {
+          communityReportStatus.textContent = 'No segment selected.';
+          return;
+        }
+        const conditions = communityConditionInputs
+          .filter((input) => input.checked)
+          .map((input) => input.value);
+        const report = {
+          segment_key: communityReportContext.segment_key,
+          dataset_mode: communityReportContext.dataset_mode,
+          title: communityReportContext.title,
+          priority: communityReportContext.priority,
+          route: communityReportContext.route,
+          conditions,
+          notes: communityReportNotes.value.trim(),
+          reporter_id: reporterId,
+          reporter_secret: reporterSecret
         };
-        reportActions.openCommunityFromIndices = (segmentIdx, featureIdx) => {
-          setCommunityReportFromFeature(segmentIdx, featureIdx);
-          setCommunityReportOpen(true);
-        };
+        communityReportSave.disabled = true;
+        try {
+          await reportsApi.createReport(report);
+          await refreshCommunityReports();
+          communityReportStatus.textContent = 'Saved.';
+          map.closePopup();
+          setCommunityReportOpen(false);
+        } catch (error) {
+          console.error('Unable to save community report', error);
+          communityReportStatus.textContent = 'Unable to save report right now.';
+        } finally {
+          communityReportSave.disabled = false;
+        }
+      });
+      reportActions.openFromFeature = (feature) => {
+        setReportFromFeature(feature);
+        setReportOpen(true);
+      };
+      reportActions.openCommunityFromIndices = (segmentIdx, featureIdx) => {
+        setCommunityReportFromFeature(segmentIdx, featureIdx);
+        setCommunityReportOpen(true);
+      };
+      await loadDataset(initialDataset);
+    }
+
+    // Routes and controls remain available while the event API is unavailable.
+    updateEvent(null);
+    initializeMap().catch(error => console.error("Error initializing map:", error));
+    fetch(CURRENT_EVENT_API_ENDPOINT)
+      .then(response => {
+        if (!response.ok) throw new Error(`current event failed: ${response.status}`);
+        return response.json();
       })
+      .then(updateEvent)
       .catch(error => console.error("Error loading priorities:", error));
   </script>
   <script>

@@ -44,3 +44,7 @@ Reports auto-expire after 3 days, and all active reports are expired when a new 
 `index.html` loads `features.bin` and `features_cycling.bin` for lines to show on the map (sidewalk and cycling modes) and queries [this condensed events data](https://hrm.datasette.danp.net/snow/snowhfx) for the current weather event state and last weather event end time.
 
 The site runs on GitHub Pages.
+
+## Tests
+
+Run `go test ./...` for the Go code and `node --test tests/map.test.cjs` for the map's loading behavior. The map tests use Node's built-in test runner and require no npm dependencies.
