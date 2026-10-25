@@ -238,13 +238,15 @@ func (r *Reader) readRoutes() error {
 }
 
 func (r *Reader) NextFeature() (Feature, bool, error) {
-	for r.segIndex < r.segCount {
+	for {
 		if r.featIndex == r.featCount {
+			if r.segIndex == r.segCount {
+				return Feature{}, false, nil
+			}
 			if err := r.readSegmentHeader(); err != nil {
 				return Feature{}, false, err
 			}
 			if r.featCount == 0 {
-				r.segIndex++
 				continue
 			}
 		}
@@ -255,7 +257,6 @@ func (r *Reader) NextFeature() (Feature, bool, error) {
 		r.featIndex++
 		return feat, true, nil
 	}
-	return Feature{}, false, nil
 }
 
 func (r *Reader) readSegmentHeader() error {
