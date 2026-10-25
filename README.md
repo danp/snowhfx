@@ -48,7 +48,7 @@ Surface conditions are unavailable when the latest observation has no temperatur
 
 `index.html` uses the API for feature datasets, the current weather event, and community reports.
 
-The site runs on GitHub Pages.
+The site runs on GitHub Pages. `.github/workflows/pages.yml` publishes `index.html` directly from `main` using GitHub Actions; no separate `pages` or `gh-pages` branch is required. In the repository's Pages settings, the publishing source should be **GitHub Actions**.
 
 While the map is visible, it refreshes weather events every 5 minutes and community reports every 2 minutes. Both refresh immediately when returning to the tab. Failed requests retain the last successful data and show when it was last checked.
 
