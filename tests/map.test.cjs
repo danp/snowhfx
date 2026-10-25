@@ -40,7 +40,35 @@ function featuresResponse(title = 'Sidewalk') {
 const jsonResponse = payload => ({ ok: true, json: async () => payload });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+function fakeClock() {
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map();
+  return {
+    setTimeout(callback, delay) {
+      const id = ++nextId;
+      timers.set(id, { at: now + delay, callback });
+      return id;
+    },
+    clearTimeout: id => timers.delete(id),
+    async advance(ms) {
+      const target = now + ms;
+      while (true) {
+        const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next || next[1].at > target) break;
+        now = next[1].at;
+        timers.delete(next[0]);
+        next[1].callback();
+        await tick();
+      }
+      now = target;
+    }
+  };
+}
+
 function startMap(fetch) {
+  const clock = fakeClock();
+  const documentListeners = new Map();
   const elements = new Map();
   const getElement = id => {
     if (!elements.has(id)) elements.set(id, element());
@@ -54,7 +82,12 @@ function startMap(fetch) {
     addLayer(child) { this.layers.push(child); },
     removeLayer(child) { this.layers = this.layers.filter(value => value !== child); },
     clearLayers() { this.layers = []; },
-    bindPopup(callback) { this.popup = callback; return this; }
+    eachLayer(callback) { this.layers.forEach(callback); },
+    bindPopup(callback) { this.popup = callback; return this; },
+    setStyle() {}, bringToFront() {},
+    isPopupOpen() { return !!this.popupOpen; },
+    setPopupContent(content) { this.popupContent = content; },
+    openPopup() { this.popupOpen = true; this.popupContent = this.popup(); }
   });
   const map = {
     on() {}, removeLayer() {}, fitBounds() {}, setView() {}, closePopup() {},
@@ -63,13 +96,24 @@ function startMap(fetch) {
   const storage = new Map();
   const errors = [];
   const context = vm.createContext({
-    fetch, TextDecoder, URLSearchParams, crypto: webcrypto,
+    fetch: (url, options) => new Promise((resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      Promise.resolve(fetch(url, options)).then(resolve, reject);
+    }),
+    TextDecoder, URLSearchParams, AbortController, crypto: webcrypto,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     console: { error: (...args) => errors.push(args) },
     location: { hostname: 'localhost' }, navigator: {},
     matchMedia: () => ({ matches: false, addEventListener() {} }),
     addEventListener() {},
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
-    document: { getElementById: getElement, querySelectorAll: () => [], addEventListener() {} },
+    document: {
+      hidden: false, getElementById: getElement, querySelectorAll: () => [],
+      addEventListener(name, callback) {
+        if (!documentListeners.has(name)) documentListeners.set(name, []);
+        documentListeners.get(name).push(callback);
+      }
+    },
     L: {
       map: () => map, tileLayer: layer, layerGroup: layer, polyline: layer,
       latLngBounds: () => ({ extend() {} }),
@@ -81,7 +125,12 @@ function startMap(fetch) {
   context.window = context;
   vm.runInContext(script, context, { filename: 'index.html' });
   return {
-    errors, getElement,
+    errors, getElement, advance: clock.advance,
+    async setHidden(hidden) {
+      context.document.hidden = hidden;
+      documentListeners.get('visibilitychange').forEach(callback => callback());
+      await tick();
+    },
     evaluate: expression => vm.runInContext(expression, context),
     click: mode => buttons.find(button => button.dataset.mode === mode).listeners.get('click')()
   };
@@ -209,5 +258,127 @@ test('failed replacement keeps the current map and can be retried', async () => 
   assert.equal(app.evaluate('routeTable[1].route'), 'Sidewalk');
   fail = false;
   await app.click('cycling');
+  assertCycling(app);
+});
+
+test('polls at separate intervals, pauses while hidden, and refreshes on return', async () => {
+  let events = 0, reports = 0;
+  const app = startMap(async (url, options) => {
+    if (url === 'features.bin') return featuresResponse();
+    assert.equal(options.cache, 'no-store');
+    if (url.endsWith('/current-event')) {
+      events++;
+      return jsonResponse({ state: 'active' });
+    }
+    reports++;
+    return jsonResponse({ reports: [] });
+  });
+  await tick();
+  assert.equal(events, 1);
+  assert.equal(reports, 1);
+  await app.advance(5 * 60 * 1000);
+  assert.equal(events, 2);
+  assert.equal(reports, 3);
+  await app.setHidden(true);
+  await app.advance(10 * 60 * 1000);
+  assert.equal(events, 2);
+  assert.equal(reports, 3);
+  await app.setHidden(false);
+  assert.equal(events, 3);
+  assert.equal(reports, 4);
+});
+
+test('failed refreshes retain deadlines and reports, show last success, and recover', async () => {
+  let fail = false;
+  const app = startMap(async url => {
+    if (url === 'features.bin') return featuresResponse();
+    if (fail) throw new Error('offline');
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'ended', max_end_time: '2026-02-10T12:00:00Z' });
+    return jsonResponse({ reports: [{ segment_key: 'Sidewalk' }] });
+  });
+  await tick();
+  fail = true;
+  await app.advance(5 * 60 * 1000);
+  assert.equal(app.evaluate('window.priorities[1].Deadline.toISOString()'), '2026-02-11T00:00:00.000Z');
+  assert.equal(app.evaluate('communityReports[0].segment_key'), 'Sidewalk');
+  assert.match(app.getElement('refresh-status').textContent, /Weather refresh failed; last checked/);
+  assert.match(app.getElement('refresh-status').textContent, /Reports refresh failed; last checked/);
+  fail = false;
+  await app.setHidden(true);
+  await app.setHidden(false);
+  assert.equal(app.getElement('refresh-status').hidden, true);
+});
+
+test('event polling updates an open popup without replacing its polyline', async () => {
+  let ended = false;
+  const app = startMap(async url => {
+    if (url === 'features.bin') return featuresResponse();
+    if (url.endsWith('/current-event')) return jsonResponse(ended
+      ? { state: 'ended', max_end_time: '2000-01-01T00:00:00Z' }
+      : { state: 'active' });
+    return jsonResponse({ reports: [] });
+  });
+  await tick();
+  app.evaluate('globalThis.openLine = renderedSegments[0].layers[0]; openLine.openPopup()');
+  assert.doesNotMatch(app.evaluate('openLine.popupContent'), /popup-311-button/);
+  ended = true;
+  await app.advance(5 * 60 * 1000);
+  assert.equal(app.evaluate('openLine === renderedSegments[0].layers[0]'), true);
+  assert.match(app.evaluate('openLine.popupContent'), /popup-311-button/);
+});
+
+test('report polling updates an open popup and replaces expired reports', async () => {
+  let reports = [{ segment_key: 'Sidewalk', conditions: ['icy'], created_at: new Date().toISOString() }];
+  const app = startMap(async url => {
+    if (url === 'features.bin') return featuresResponse();
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    return jsonResponse({ reports });
+  });
+  await tick();
+  app.evaluate('renderedSegments[0].layers[0].openPopup()');
+  assert.match(app.evaluate('renderedSegments[0].layers[0].popupContent'), /Icy/);
+  reports = [];
+  await app.advance(2 * 60 * 1000);
+  assert.match(app.evaluate('renderedSegments[0].layers[0].popupContent'), /None yet/);
+});
+
+test('hanging requests time out and retry without overlapping on visibility changes', async () => {
+  let events = 0;
+  const pending = deferred();
+  const app = startMap(async url => {
+    if (url === 'features.bin') return featuresResponse();
+    if (url.endsWith('/current-event')) {
+      events++;
+      return events === 1 ? pending.promise : jsonResponse({ state: 'active' });
+    }
+    return jsonResponse({ reports: [] });
+  });
+  await tick();
+  await app.setHidden(true);
+  await app.setHidden(false);
+  assert.equal(events, 1);
+  await app.advance(10000);
+  assert.equal(events, 2);
+  assert.equal(app.evaluate('currentEventSummary.state'), 'active');
+  pending.resolve(jsonResponse({ state: 'ended' }));
+  await tick();
+  assert.equal(app.evaluate('currentEventSummary.state'), 'active');
+});
+
+test('dataset switches invalidate a pending report poll', async () => {
+  let sidewalkRequests = 0;
+  const pending = deferred();
+  const app = startMap(async url => {
+    if (url === 'features.bin') return featuresResponse();
+    if (url === 'features_cycling.bin') return featuresResponse('Bikeway');
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    if (url.includes('dataset_mode=sidewalks') && ++sidewalkRequests === 2) return pending.promise;
+    return jsonResponse({ reports: [{ segment_key: url.includes('cycling') ? 'Bikeway' : 'Sidewalk' }] });
+  });
+  await tick();
+  await app.advance(2 * 60 * 1000);
+  await app.click('cycling');
+  pending.resolve(jsonResponse({ reports: [{ segment_key: 'Sidewalk' }] }));
+  await tick();
   assertCycling(app);
 });

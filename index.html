@@ -66,6 +66,12 @@
       gap: 8px;
       margin-left: auto;
     }
+    #refresh-status {
+      flex-basis: 100%;
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
     .quick-toggle {
       display: inline-flex;
       border: 1px solid var(--control-border);
@@ -576,6 +582,7 @@
         <button type="button" data-mode="cycling" data-full="Cycling" aria-label="Cycling">Cycling</button>
       </div>
     </div>
+    <p id="refresh-status" role="status" aria-live="polite" hidden></p>
   </div>
   <div id="map" role="region" aria-label="Map of Halifax snow clearing priorities for sidewalks and cycling routes"></div>
   <div class="about-panel" id="about-panel" aria-hidden="true">
@@ -946,6 +953,10 @@
     const REPORTS_API_ENDPOINT = `${API_BASE_ENDPOINT}/community-reports`;
     const CURRENT_EVENT_API_ENDPOINT = `${API_BASE_ENDPOINT}/current-event`;
     let currentEventSummary = null;
+    const refreshState = {
+      weather: { lastSuccess: null, failed: false },
+      reports: { lastSuccess: null, failed: false }
+    };
     const eventStatusToggle = document.getElementById('event-status-toggle');
     const eventStatusPanel = document.getElementById('event-status-panel');
     const eventStatusClose = document.getElementById('event-status-close');
@@ -1078,11 +1089,7 @@
         if (filters && filters.dataset_mode) {
           params.set('dataset_mode', filters.dataset_mode);
         }
-        const response = await fetch(`${REPORTS_API_ENDPOINT}?${params.toString()}`);
-        if (!response.ok) {
-          throw new Error(`list reports failed: ${response.status}`);
-        }
-        const payload = await response.json();
+        const payload = await fetchAPIJSON(`${REPORTS_API_ENDPOINT}?${params.toString()}`);
         return normalizeReportsResponse(payload)
           .filter((report) => report && report.segment_key)
           .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1229,6 +1236,7 @@
                 .bindPopup(function() {
                    return getPopupContent(segmentIdx, featureIdx);
                  });
+              polyline.featureIndex = featureIdx;
               polyline.addTo(segmentLayer);
               renderedFeatureCount++;
             });
@@ -1256,6 +1264,107 @@
         delete renderedSegments[key];
       }
       featuresLayer.clearLayers();
+    }
+
+    function refreshRenderedFeatures() {
+      Object.entries(renderedSegments).forEach(([segmentIdx, group]) => {
+        group.eachLayer(polyline => {
+          const featureIdx = polyline.featureIndex;
+          const hasReport = hasReportForFeature(currentDatasetMode, segmentIdx, featureIdx);
+          polyline.setStyle({
+            weight: showReportsMode && !hasReport ? Math.max(2, lineWeight - 2) : lineWeight,
+            opacity: showReportsMode && !hasReport ? 0.38 : 0.95
+          });
+          if (hasReport) polyline.bringToFront();
+          if (polyline.isPopupOpen()) {
+            polyline.setPopupContent(getPopupContent(segmentIdx, featureIdx));
+          }
+        });
+      });
+    }
+
+    async function fetchAPIJSON(url) {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+        if (!response.ok) throw new Error(`request failed: ${response.status}`);
+        return await response.json();
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+
+    function updateRefreshStatus() {
+      const messages = Object.entries(refreshState)
+        .filter(([, state]) => state.failed)
+        .map(([source, state]) => {
+          const label = source === 'weather' ? 'Weather' : 'Reports';
+          return state.lastSuccess
+            ? `${label} refresh failed; last checked ${state.lastSuccess.toLocaleString()}.`
+            : `${label} unavailable; retrying automatically.`;
+        });
+      const status = document.getElementById('refresh-status');
+      status.textContent = messages.join(' ');
+      status.hidden = messages.length === 0;
+    }
+
+    function startVisiblePolling(refresh, interval, immediate = true) {
+      let timer = null;
+      let running = false;
+      let refreshOnReturn = false;
+      async function run() {
+        window.clearTimeout(timer);
+        timer = null;
+        if (document.hidden) return;
+        if (running) {
+          refreshOnReturn = true;
+          return;
+        }
+        running = true;
+        try {
+          await refresh();
+        } catch (error) {
+          console.error('Unable to refresh map data:', error);
+        } finally {
+          running = false;
+          if (!document.hidden) {
+            if (refreshOnReturn) {
+              refreshOnReturn = false;
+              void run();
+            } else {
+              timer = window.setTimeout(run, interval);
+            }
+          }
+        }
+      }
+      document.addEventListener('visibilitychange', () => {
+        window.clearTimeout(timer);
+        timer = null;
+        if (document.hidden) refreshOnReturn = false;
+        else void run();
+      });
+      if (immediate) void run();
+      else if (!document.hidden) timer = window.setTimeout(run, interval);
+    }
+
+    async function refreshCurrentEvent() {
+      try {
+        const data = await fetchAPIJSON(CURRENT_EVENT_API_ENDPOINT);
+        if (!data || !['active', 'ended', 'dormant'].includes(data.state)) {
+          throw new Error('Invalid current event response');
+        }
+        if (data.max_end_time && !Number.isFinite(Date.parse(data.max_end_time))) {
+          throw new Error('Invalid weather event end time');
+        }
+        updateEvent(data);
+        refreshState.weather = { lastSuccess: new Date(), failed: false };
+        refreshRenderedFeatures();
+      } catch (error) {
+        console.error('Error loading priorities:', error);
+        refreshState.weather.failed = true;
+      }
+      updateRefreshStatus();
     }
 
     function resetRenderedFeatures() {
@@ -1369,6 +1478,7 @@
       let reportDatasetUrl = 'Not available';
       let communityReportContext = null;
       let reportsLoadGeneration = 0;
+      let reportsRequest = null;
       const datasetConfig = {
         sidewalks: { url: 'features.bin', datasetCode: 0 },
         cycling: { url: 'features_cycling.bin', datasetCode: 1 }
@@ -1379,21 +1489,31 @@
       const reporterSecret = getOrCreateReporterSecret();
       communityReporterIdLabel.textContent = `Reporter ID: ${reporterId}`;
 
-      async function refreshCommunityReports() {
+      function refreshCommunityReports(force = false) {
+        if (!hasLoadedDataset) return Promise.resolve();
         const generation = datasetLoadGeneration;
+        if (!force && reportsRequest?.generation === generation) return reportsRequest.promise;
         const reportGeneration = ++reportsLoadGeneration;
         const isCurrent = () => generation === datasetLoadGeneration && reportGeneration === reportsLoadGeneration;
-        try {
-          const reports = await reportsApi.listReports({ dataset_mode: currentDatasetMode });
-          if (!isCurrent()) return;
-          communityReports = reports;
-        } catch (error) {
-          if (!isCurrent()) return;
-          console.error('Unable to load community reports', error);
-          communityReports = [];
-        }
-        clearRenderedFeatures();
-        updateVisibleFeatures();
+        const promise = (async () => {
+          try {
+            const reports = await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+            if (!isCurrent()) return;
+            communityReports = reports;
+            refreshState.reports = { lastSuccess: new Date(), failed: false };
+          } catch (error) {
+            if (!isCurrent()) return;
+            console.error('Unable to load community reports', error);
+            refreshState.reports.failed = true;
+          } finally {
+            if (reportsRequest?.promise === promise) reportsRequest = null;
+          }
+          communityReports = communityReports.filter(report => !report.expires_at || new Date(report.expires_at) > new Date());
+          refreshRenderedFeatures();
+          updateRefreshStatus();
+        })();
+        reportsRequest = { generation, promise };
+        return promise;
       }
 
       function updateQuickToggle(mode) {
@@ -1516,6 +1636,8 @@
           currentDatasetMode = mode;
           currentDatasetCode = config.datasetCode;
           communityReports = [];
+          refreshState.reports = { lastSuccess: null, failed: false };
+          updateRefreshStatus();
           if (!hasLoadedDataset) {
             if (savedState) {
               map.setView(savedState.center, savedState.zoom);
@@ -1534,7 +1656,7 @@
             });
             mapListenersSet = true;
           }
-          await refreshCommunityReports();
+          await refreshCommunityReports(true);
         } catch (error) {
           if (generation !== datasetLoadGeneration) return;
           console.error('Error loading dataset:', error);
@@ -1807,7 +1929,7 @@
         communityReportSave.disabled = true;
         try {
           await reportsApi.createReport(report);
-          await refreshCommunityReports();
+          await refreshCommunityReports(true);
           communityReportStatus.textContent = 'Saved.';
           map.closePopup();
           setCommunityReportOpen(false);
@@ -1826,19 +1948,14 @@
         setCommunityReportFromFeature(segmentIdx, featureIdx);
         setCommunityReportOpen(true);
       };
+      startVisiblePolling(refreshCommunityReports, 2 * 60 * 1000, false);
       await loadDataset(initialDataset);
     }
 
     // Routes and controls remain available while the event API is unavailable.
     updateEvent(null);
     initializeMap().catch(error => console.error("Error initializing map:", error));
-    fetch(CURRENT_EVENT_API_ENDPOINT)
-      .then(response => {
-        if (!response.ok) throw new Error(`current event failed: ${response.status}`);
-        return response.json();
-      })
-      .then(updateEvent)
-      .catch(error => console.error("Error loading priorities:", error));
+    startVisiblePolling(refreshCurrentEvent, 5 * 60 * 1000);
   </script>
   <script>
     window.goatcounter = {

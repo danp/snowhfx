@@ -45,6 +45,8 @@ Reports auto-expire after 3 days, and all active reports are expired when a new 
 
 The site runs on GitHub Pages.
 
+While the map is visible, it refreshes weather events every 5 minutes and community reports every 2 minutes. Both refresh immediately when returning to the tab. Failed requests retain the last successful data and show when it was last checked.
+
 ## Tests
 
 Run `go test ./...` for the Go code and `node --test tests/map.test.cjs` for the map's loading behavior. The map tests use Node's built-in test runner and require no npm dependencies.
