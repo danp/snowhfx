@@ -132,6 +132,7 @@ func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	var dbPath string
 	var addr string
+	var featuresDir string
 	var weatherEnabled bool
 	var weatherStation string
 	var weatherObservationURL string
@@ -139,12 +140,25 @@ func main() {
 	var weatherRefreshInterval time.Duration
 	fs.StringVar(&dbPath, "db", "data.db", "database file path")
 	fs.StringVar(&addr, "addr", ":8080", "http listen address")
+	fs.StringVar(&featuresDir, "features-dir", "", "persistent features directory (default $XDG_DATA_HOME/snowhfx/features or ~/.local/share/snowhfx/features)")
 	fs.BoolVar(&weatherEnabled, "weather-enabled", true, "enable periodic weather ingestion")
 	fs.StringVar(&weatherStation, "weather-station", defaultWeatherStation, "Environment Canada station code")
 	fs.StringVar(&weatherObservationURL, "weather-observation-url", "", "override observation endpoint URL")
 	fs.StringVar(&weatherClimateID, "weather-climate-id", defaultWeatherClimate, "Environment Canada climate-daily station identifier")
 	fs.DurationVar(&weatherRefreshInterval, "weather-refresh-interval", 15*time.Minute, "weather refresh interval")
 	fs.Parse(os.Args[1:])
+	if featuresDir == "" {
+		var err error
+		featuresDir, err = defaultFeaturesDir()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	features, err := newFeatureStore(featuresDir, bundledFeatures)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("feature data stored in %s", featuresDir)
 
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=journal_mode=WAL&_pragma=foreign_keys=ON&_pragma=busy_timeout=5000")
 	if err != nil {
@@ -175,7 +189,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      newAPIHandler(db),
+		Handler:      newAPIHandler(db, features),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -187,8 +201,11 @@ func main() {
 	}
 }
 
-func newAPIHandler(db *sql.DB) http.Handler {
+func newAPIHandler(db *sql.DB, features *featureStore) http.Handler {
 	mux := http.NewServeMux()
+	if features != nil {
+		features.registerRoutes(mux)
+	}
 	mux.HandleFunc("GET /api/v1/current-event", func(w http.ResponseWriter, r *http.Request) {
 		setCORSHeaders(w)
 		handleCurrentEvent(db, w, r)

@@ -44,7 +44,7 @@ func insertEvent(t *testing.T, db *sql.DB, obs int, eventID string) {
 
 func setupTestServer(t *testing.T, db *sql.DB) *httptest.Server {
 	t.Helper()
-	ts := httptest.NewServer(newAPIHandler(db))
+	ts := httptest.NewServer(newAPIHandler(db, nil))
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -88,7 +88,7 @@ func TestCommunityReportsPreflight(t *testing.T) {
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	req.Header.Set("Access-Control-Request-Headers", "content-type")
 	w := httptest.NewRecorder()
-	newAPIHandler(nil).ServeHTTP(w, req)
+	newAPIHandler(nil, nil).ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())

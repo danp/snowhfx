@@ -111,7 +111,7 @@ func TestSurfaceConditionsRejectStaleStoredSignal(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/surface-conditions", nil)
 	w := httptest.NewRecorder()
-	newAPIHandler(db).ServeHTTP(w, req)
+	newAPIHandler(db, nil).ServeHTTP(w, req)
 	var got surfaceConditionsResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
