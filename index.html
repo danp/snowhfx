@@ -857,7 +857,7 @@
         offset += nameLength;
         namePieces.push(name);
       }
-      routeTable = [null];
+      const routes = [null];
       for (let r = 0; r < routeCount; r++) {
         const maintCount = readUVarint();
         const maintParts = [];
@@ -871,7 +871,7 @@
           const pieceID = readUVarint();
           routeParts.push(namePieces[pieceID] || '');
         }
-        routeTable.push({ maint: maintParts.join(' '), route: routeParts.join(' ') });
+        routes.push({ maint: maintParts.join(' '), route: routeParts.join(' ') });
       }
 
       const segments = [];
@@ -930,7 +930,7 @@
         }
         segments.push({ bounds: segBounds, features });
       }
-      return segments;
+      return { segments, routes };
     }
 
     // Global storage for segments and rendered segments.
@@ -957,6 +957,7 @@
     // Track segments that are currently rendered, keyed by segment index.
     const renderedSegments = {};
     let hasLoadedDataset = false;
+    let datasetLoadGeneration = 0;
     let mapListenersSet = false;
     const isCoarsePointer = window.matchMedia('(pointer: coarse)').matches;
     const lineWeight = isCoarsePointer ? 9 : 6;
@@ -1082,10 +1083,9 @@
           throw new Error(`list reports failed: ${response.status}`);
         }
         const payload = await response.json();
-        communityReports = normalizeReportsResponse(payload)
+        return normalizeReportsResponse(payload)
           .filter((report) => report && report.segment_key)
           .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-        return communityReports;
       },
       async createReport(report) {
         const response = await fetch(REPORTS_API_ENDPOINT, {
@@ -1263,38 +1263,12 @@
       allSegments = [];
     }
 
-    async function loadAndRenderSegmentedFeatures(url, options) {
-      const opts = options || {};
-      try {
-        const response = await fetch(url);
-        const arrayBuffer = await response.arrayBuffer();
-        allSegments = await decodeSegmentedFeatures(arrayBuffer);
-        if (allSegments.length === 0) {
-          console.error("No segments found in the binary file.");
-          return;
-        }
-        // Compute global bounds from all segments.
-        const globalBounds = L.latLngBounds();
-        allSegments.forEach(segment => globalBounds.extend(segment.bounds));
-        if (!opts.preserveView) {
-          if (savedState) {
-            map.setView(savedState.center, savedState.zoom);
-          } else if (opts.fitBounds !== false) {
-            map.fitBounds(globalBounds);
-          }
-        }
-        updateVisibleFeatures();
-        // Update visible segments when the map moves or zooms.
-        if (!mapListenersSet) {
-          map.on('moveend', () => {
-            saveMapState(map);
-            updateVisibleFeatures();
-          });
-          mapListenersSet = true;
-        }
-      } catch (error) {
-        console.error("Error rendering segmented features:", error);
-      }
+    async function loadSegmentedFeatures(url) {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`features request failed: ${response.status}`);
+      const data = await decodeSegmentedFeatures(await response.arrayBuffer());
+      if (data.segments.length === 0) throw new Error('No segments found in the binary file.');
+      return data;
     }
 
     function updateEvent(data) {
@@ -1394,6 +1368,7 @@
       let reportRouteText = 'Not matched';
       let reportDatasetUrl = 'Not available';
       let communityReportContext = null;
+      let reportsLoadGeneration = 0;
       const datasetConfig = {
         sidewalks: { url: 'features.bin', datasetCode: 0 },
         cycling: { url: 'features_cycling.bin', datasetCode: 1 }
@@ -1405,9 +1380,15 @@
       communityReporterIdLabel.textContent = `Reporter ID: ${reporterId}`;
 
       async function refreshCommunityReports() {
+        const generation = datasetLoadGeneration;
+        const reportGeneration = ++reportsLoadGeneration;
+        const isCurrent = () => generation === datasetLoadGeneration && reportGeneration === reportsLoadGeneration;
         try {
-          await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+          const reports = await reportsApi.listReports({ dataset_mode: currentDatasetMode });
+          if (!isCurrent()) return;
+          communityReports = reports;
         } catch (error) {
+          if (!isCurrent()) return;
           console.error('Unable to load community reports', error);
           communityReports = [];
         }
@@ -1519,16 +1500,46 @@
           console.error("Unknown dataset:", mode);
           return;
         }
-        currentDatasetMode = mode;
-        currentDatasetCode = config.datasetCode;
-        resetRenderedFeatures();
-        const isInitialLoad = !hasLoadedDataset;
-        const fitBounds = !savedState && isInitialLoad;
-        const preserveView = !isInitialLoad;
-        hasLoadedDataset = true;
-        await loadAndRenderSegmentedFeatures(config.url, { fitBounds, preserveView });
-        await refreshCommunityReports();
+        const generation = ++datasetLoadGeneration;
         updateQuickToggle(mode);
+        try {
+          const data = await loadSegmentedFeatures(config.url);
+          if (generation !== datasetLoadGeneration) return;
+
+          // Commit geometry and its metadata together only for the latest selection.
+          map.closePopup();
+          setReportOpen(false);
+          setCommunityReportOpen(false);
+          resetRenderedFeatures();
+          allSegments = data.segments;
+          routeTable = data.routes;
+          currentDatasetMode = mode;
+          currentDatasetCode = config.datasetCode;
+          communityReports = [];
+          if (!hasLoadedDataset) {
+            if (savedState) {
+              map.setView(savedState.center, savedState.zoom);
+            } else {
+              const globalBounds = L.latLngBounds();
+              allSegments.forEach(segment => globalBounds.extend(segment.bounds));
+              map.fitBounds(globalBounds);
+            }
+          }
+          hasLoadedDataset = true;
+          updateVisibleFeatures();
+          if (!mapListenersSet) {
+            map.on('moveend', () => {
+              saveMapState(map);
+              updateVisibleFeatures();
+            });
+            mapListenersSet = true;
+          }
+          await refreshCommunityReports();
+        } catch (error) {
+          if (generation !== datasetLoadGeneration) return;
+          console.error('Error loading dataset:', error);
+          updateQuickToggle(currentDatasetMode);
+        }
       }
 
       quickButtons.forEach(button => {

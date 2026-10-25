@@ -57,7 +57,7 @@ function startMap(fetch) {
     bindPopup(callback) { this.popup = callback; return this; }
   });
   const map = {
-    on() {}, removeLayer() {}, fitBounds() {}, setView() {},
+    on() {}, removeLayer() {}, fitBounds() {}, setView() {}, closePopup() {},
     getBounds: () => ({ intersects: () => true })
   };
   const storage = new Map();
@@ -124,4 +124,90 @@ test('event data arriving after routes updates deadlines and popups', async () =
   assert.equal(app.evaluate('window.priorities[1].Deadline.toISOString()'), '2026-02-11T00:00:00.000Z');
   assert.doesNotMatch(app.evaluate('getPopupContent(0, 0)'), /Unavailable/);
   assert.equal(app.errors.length, 0);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function assertCycling(app) {
+  assert.equal(app.evaluate('currentDatasetMode'), 'cycling');
+  assert.equal(app.evaluate('currentDatasetCode'), 1);
+  assert.equal(app.evaluate('allSegments[0].features[0].title'), 'Bikeway');
+  assert.equal(app.evaluate('routeTable[1].route'), 'Bikeway');
+  assert.equal(app.evaluate('communityReports[0].segment_key'), 'Bikeway');
+}
+
+test('late initial dataset cannot overwrite the selected dataset or route table', async () => {
+  const sidewalks = deferred();
+  const app = startMap(async url => {
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    if (url === 'features.bin') return sidewalks.promise;
+    if (url === 'features_cycling.bin') return featuresResponse('Bikeway');
+    return jsonResponse({ reports: [{ segment_key: 'Bikeway' }] });
+  });
+  await app.click('cycling');
+  assertCycling(app);
+  sidewalks.resolve(featuresResponse());
+  await tick();
+  assertCycling(app);
+  assert.equal(app.errors.length, 0);
+});
+
+for (const outcome of ['success', 'failure']) {
+  test(`late report ${outcome} cannot overwrite the selected dataset's reports`, async () => {
+    const reports = deferred();
+    const app = startMap(async url => {
+      if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+      if (url === 'features.bin') return featuresResponse();
+      if (url === 'features_cycling.bin') return featuresResponse('Bikeway');
+      if (url.includes('dataset_mode=sidewalks')) return reports.promise;
+      return jsonResponse({ reports: [{ segment_key: 'Bikeway' }] });
+    });
+    await tick();
+    await app.click('cycling');
+    assertCycling(app);
+    if (outcome === 'success') reports.resolve(jsonResponse({ reports: [{ segment_key: 'Sidewalk' }] }));
+    else reports.reject(new Error('offline'));
+    await tick();
+    assertCycling(app);
+  });
+}
+
+test('switching back to the same mode still discards an older request', async () => {
+  const cycling = deferred();
+  const app = startMap(async url => {
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    if (url === 'features.bin') return featuresResponse();
+    if (url === 'features_cycling.bin') return cycling.promise;
+    return jsonResponse({ reports: [] });
+  });
+  await tick();
+  const oldLoad = app.click('cycling');
+  await app.click('sidewalks');
+  cycling.resolve(featuresResponse('Bikeway'));
+  await oldLoad;
+  assert.equal(app.evaluate('currentDatasetMode'), 'sidewalks');
+  assert.equal(app.evaluate('allSegments[0].features[0].title'), 'Sidewalk');
+  assert.equal(app.evaluate('routeTable[1].route'), 'Sidewalk');
+});
+
+test('failed replacement keeps the current map and can be retried', async () => {
+  let fail = true;
+  const app = startMap(async url => {
+    if (url.endsWith('/current-event')) return jsonResponse({ state: 'active' });
+    if (url === 'features.bin') return featuresResponse();
+    if (url === 'features_cycling.bin') return fail ? { ok: false, status: 503 } : featuresResponse('Bikeway');
+    return jsonResponse({ reports: [{ segment_key: 'Bikeway' }] });
+  });
+  await tick();
+  await app.click('cycling');
+  assert.equal(app.evaluate('currentDatasetMode'), 'sidewalks');
+  assert.equal(app.evaluate('allSegments[0].features[0].title'), 'Sidewalk');
+  assert.equal(app.evaluate('routeTable[1].route'), 'Sidewalk');
+  fail = false;
+  await app.click('cycling');
+  assertCycling(app);
 });
