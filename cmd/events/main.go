@@ -225,23 +225,23 @@ func parseUpdateTime(txt string, t time.Time) (_ time.Time, ok bool) {
 	for {
 		for _, format := range formats {
 			if parsed, err := time.ParseInLocation(format.s, txt, t.Location()); err == nil {
+				year, month, day := parsed.Date()
+				hour, minute, second := parsed.Clock()
 				if !format.hasYear {
-					parsed = parsed.AddDate(t.Year(), 0, 0)
-					if parsed.After(t) {
-						parsed = parsed.AddDate(-1, 0, 0)
-					}
+					year = t.Year()
 				}
 				if !format.hasDate {
-					parsed = parsed.AddDate(0, int(t.Month())-1, t.Day())
-					if parsed.After(t) {
-						parsed = parsed.AddDate(0, 0, -1)
-					}
+					month, day = t.Month(), t.Day()
 				}
 				if !format.hasTime {
-					hms := time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute + time.Duration(t.Second())*time.Second
-					parsed = parsed.Add(hms)
-					if parsed.After(t) {
+					hour, minute, second = t.Clock()
+				}
+				parsed = time.Date(year, month, day, hour, minute, second, 0, t.Location())
+				if parsed.After(t) {
+					if !format.hasDate {
 						parsed = parsed.AddDate(0, 0, -1)
+					} else if !format.hasYear {
+						parsed = parsed.AddDate(-1, 0, 0)
 					}
 				}
 				return parsed, true
