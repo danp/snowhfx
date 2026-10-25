@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,31 @@ func doJSON(t *testing.T, ts *httptest.Server, method, path string, body any) (i
 		t.Fatal(err)
 	}
 	return res.StatusCode, resBody
+}
+
+func TestCommunityReportsPreflight(t *testing.T) {
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/community-reports", nil)
+	req.Header.Set("Origin", "https://snowhfx.danp.net")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type")
+	w := httptest.NewRecorder()
+	newAPIHandler(nil).ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("unexpected allowed origin: %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); !contains(strings.Split(got, ", "), http.MethodPost) {
+		t.Errorf("POST missing from allowed methods: %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Headers"); !strings.EqualFold(got, "Content-Type") {
+		t.Errorf("unexpected allowed headers: %q", got)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("expected empty body, got %q", w.Body.String())
+	}
 }
 
 func TestCreateAndListReports(t *testing.T) {
@@ -302,4 +328,117 @@ func TestCurrentEventEndpoint(t *testing.T) {
 	if payload.ServiceUpdate != "Winter weather event underway; crews preparing." {
 		t.Fatalf("unexpected service_update: %q", payload.ServiceUpdate)
 	}
+}
+
+func TestWeatherRefreshAndSurfaceConditionsEndpoint(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	if _, err := db.Exec(
+		`INSERT INTO weather_observations (observed_at, station_code, temperature_c, condition_text, raw_json, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"2026-03-01T09:00:00Z",
+		"ahd",
+		4.0,
+		"Rain showers",
+		`{}`,
+		"2026-03-01T09:05:00Z",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	weatherTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/obs":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `[{"observedAt":"Halifax Dockyard","provinceCode":"ns","climateId":"8202240","tcid":"ahd","timeStamp":"2026-03-01T14:00:00.000Z","iconCode":"29","condition":"","temperature":{"metric":"0.5"},"dewpoint":{"metric":"0.1"},"pressure":{"metric":"101.2"},"visibility":{"metric":"20"},"humidity":"94","windSpeed":{"metric":"18"},"windGust":{"metric":""},"tcId":"AHD"}]`)
+		case r.URL.Path == "/collections/climate-daily/items/8202250.2026.3.1":
+			http.NotFound(w, r)
+		case r.URL.Path == "/collections/climate-daily/items/8202250.2026.2.28":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"properties":{"LOCAL_DATE":"2026-02-28","MIN_TEMPERATURE":-6,"MAX_TEMPERATURE":1,"SNOW_ON_GROUND":20}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer weatherTS.Close()
+
+	refresher := &weatherRefresher{
+		db:             db,
+		client:         weatherTS.Client(),
+		stationCode:    "ahd",
+		observationURL: weatherTS.URL + "/obs",
+		dailyClimateID: "8202250",
+		now: func() time.Time {
+			return time.Date(2026, time.March, 1, 14, 30, 0, 0, time.UTC)
+		},
+		dailyLookback: 3,
+	}
+
+	originalTransport := refresher.client.Transport
+	refresher.client.Transport = rewriteTransport{
+		base:    originalTransport,
+		baseURL: weatherTS.URL,
+	}
+
+	if err := refresher.refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := setupTestServer(t, db)
+	resCode, resBody := doJSON(t, ts, http.MethodGet, "/api/v1/surface-conditions", nil)
+	if resCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", resCode, string(resBody))
+	}
+
+	var payload surfaceConditionsResponse
+	if err := json.Unmarshal(resBody, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Status != "flash_refreeze_risk" {
+		t.Fatalf("unexpected status: %q", payload.Status)
+	}
+	if !contains(payload.Tags, "melting_wet") {
+		t.Fatalf("expected melting_wet tag, got %#v", payload.Tags)
+	}
+	if payload.Detail["snow_on_ground_cm"] == nil {
+		t.Fatalf("expected snow_on_ground_cm detail")
+	}
+
+	var climateDate string
+	if err := db.QueryRow(`SELECT climate_date FROM weather_daily WHERE station_code = ? ORDER BY climate_date DESC LIMIT 1`, "ahd").Scan(&climateDate); err != nil {
+		t.Fatal(err)
+	}
+	if climateDate != "2026-02-28" {
+		t.Fatalf("expected fallback daily climate_date 2026-02-28, got %q", climateDate)
+	}
+}
+
+type rewriteTransport struct {
+	base    http.RoundTripper
+	baseURL string
+}
+
+func (rt rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	if strings.HasPrefix(req.URL.Host, "api.weather.gc.ca") {
+		replacement, err := http.NewRequestWithContext(req.Context(), req.Method, rt.baseURL+req.URL.Path, nil)
+		if err != nil {
+			return nil, err
+		}
+		cloned.URL = replacement.URL
+	}
+	if rt.base == nil {
+		rt.base = http.DefaultTransport
+	}
+	return rt.base.RoundTrip(cloned)
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

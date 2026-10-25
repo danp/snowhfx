@@ -1,10 +1,10 @@
-api
-events
+/api
+/events
 *.db
 *-shm
 *-wal
 features*.bin
 *.geojson
 debug*.json
-tmp
+/tmp
 *.pdf

@@ -11,10 +11,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +24,11 @@ import (
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
-const reportTTL = 72 * time.Hour
+const (
+	reportTTL             = 72 * time.Hour
+	defaultWeatherStation = "yhz"
+	defaultWeatherClimate = "8202251"
+)
 
 var allowedConditions = map[string]struct{}{
 	"snow_covered": {},
@@ -70,12 +76,72 @@ type currentEventResponse struct {
 	ServiceUpdate string `json:"service_update,omitempty"`
 }
 
+type weatherObservationRow struct {
+	ObservedAt    string
+	TemperatureC  float64
+	ConditionText string
+	Precip1hMM    float64
+	HasPrecip1h   bool
+}
+
+type weatherDailyRow struct {
+	ClimateDate    string
+	MinTempC       sql.NullFloat64
+	MaxTempC       sql.NullFloat64
+	TotalRainMM    sql.NullFloat64
+	TotalSnowCM    sql.NullFloat64
+	TotalPrecipMM  sql.NullFloat64
+	SnowOnGroundCM sql.NullFloat64
+	MaxGustKPH     sql.NullFloat64
+}
+
+type surfaceConditionsResponse struct {
+	ComputedAt  string         `json:"computed_at"`
+	StationCode string         `json:"station_code"`
+	Status      string         `json:"status"`
+	Score       int            `json:"score"`
+	Tags        []string       `json:"tags"`
+	Summary     string         `json:"summary"`
+	Detail      map[string]any `json:"detail"`
+}
+
+type weatherRefresher struct {
+	db              *sql.DB
+	client          *http.Client
+	stationCode     string
+	observationURL  string
+	dailyClimateID  string
+	refreshInterval time.Duration
+	dailyLookback   int
+	now             func() time.Time
+}
+
+type httpStatusError struct {
+	StatusCode int
+	URL        string
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d from %s: %s", e.StatusCode, e.URL, e.Body)
+}
+
 func main() {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	var dbPath string
 	var addr string
+	var weatherEnabled bool
+	var weatherStation string
+	var weatherObservationURL string
+	var weatherClimateID string
+	var weatherRefreshInterval time.Duration
 	fs.StringVar(&dbPath, "db", "data.db", "database file path")
 	fs.StringVar(&addr, "addr", ":8080", "http listen address")
+	fs.BoolVar(&weatherEnabled, "weather-enabled", true, "enable periodic weather ingestion")
+	fs.StringVar(&weatherStation, "weather-station", defaultWeatherStation, "Environment Canada station code")
+	fs.StringVar(&weatherObservationURL, "weather-observation-url", "", "override observation endpoint URL")
+	fs.StringVar(&weatherClimateID, "weather-climate-id", defaultWeatherClimate, "Environment Canada climate-daily station identifier")
+	fs.DurationVar(&weatherRefreshInterval, "weather-refresh-interval", 15*time.Minute, "weather refresh interval")
 	fs.Parse(os.Args[1:])
 
 	db, err := sql.Open("sqlite3", "file:"+dbPath+"?_pragma=journal_mode=WAL&_pragma=foreign_keys=ON&_pragma=busy_timeout=5000")
@@ -89,6 +155,20 @@ func main() {
 
 	if err := ensureSchema(db); err != nil {
 		log.Fatal(err)
+	}
+
+	if weatherEnabled {
+		refresher := &weatherRefresher{
+			db:              db,
+			client:          &http.Client{Timeout: 10 * time.Second},
+			stationCode:     weatherStation,
+			observationURL:  weatherObservationURL,
+			dailyClimateID:  weatherClimateID,
+			refreshInterval: weatherRefreshInterval,
+			dailyLookback:   7,
+			now:             time.Now,
+		}
+		go refresher.Start(context.Background())
 	}
 
 	server := &http.Server{
@@ -118,6 +198,14 @@ func newAPIHandler(db *sql.DB) http.Handler {
 	mux.HandleFunc("POST /api/v1/community-reports", func(w http.ResponseWriter, r *http.Request) {
 		setCORSHeaders(w)
 		handleCreateReport(db, w, r)
+	})
+	mux.HandleFunc("OPTIONS /api/v1/community-reports", func(w http.ResponseWriter, r *http.Request) {
+		setCORSHeaders(w)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /api/v1/surface-conditions", func(w http.ResponseWriter, r *http.Request) {
+		setCORSHeaders(w)
+		handleSurfaceConditions(db, w, r)
 	})
 	return mux
 }
@@ -152,10 +240,54 @@ func ensureSchema(db *sql.DB) error {
 			meta_value TEXT NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS weather_observations (
+			observed_at DATETIME PRIMARY KEY,
+			station_code TEXT NOT NULL,
+			temperature_c REAL,
+			dew_point_c REAL,
+			humidity_pct INTEGER,
+			wind_kph REAL,
+			wind_gust_kph REAL,
+			visibility_km REAL,
+			pressure_kpa REAL,
+			condition_code TEXT,
+			condition_text TEXT,
+			precip_1h_mm REAL,
+			raw_json TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS weather_daily (
+			station_code TEXT NOT NULL,
+			climate_date TEXT NOT NULL,
+			min_temp_c REAL,
+			max_temp_c REAL,
+			total_rain_mm REAL,
+			total_snow_cm REAL,
+			total_precip_mm REAL,
+			snow_on_ground_cm REAL,
+			max_gust_kph REAL,
+			raw_json TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL,
+			PRIMARY KEY (station_code, climate_date)
+		)`,
+		`CREATE TABLE IF NOT EXISTS surface_conditions (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			station_code TEXT NOT NULL,
+			computed_at DATETIME NOT NULL,
+			status TEXT NOT NULL,
+			score INTEGER NOT NULL,
+			tags_json TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			detail_json TEXT NOT NULL
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_community_reports_event_dataset_created
 		   ON community_reports (event_id, dataset_mode, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_community_reports_segment
 		   ON community_reports (segment_key)`,
+		`CREATE INDEX IF NOT EXISTS idx_weather_observations_station_observed
+		   ON weather_observations (station_code, observed_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_weather_daily_station_date
+		   ON weather_daily (station_code, climate_date DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -180,6 +312,22 @@ func handleCurrentEvent(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	row, err := currentEvent(ctx, db)
 	if err != nil {
+		http.Error(w, fmt.Sprintf("query failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, row)
+}
+
+func handleSurfaceConditions(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	row, err := currentSurfaceConditions(ctx, db)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "surface conditions unavailable", http.StatusNotFound)
+			return
+		}
 		http.Error(w, fmt.Sprintf("query failed: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -476,6 +624,30 @@ FROM
 	return res, nil
 }
 
+func currentSurfaceConditions(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (surfaceConditionsResponse, error) {
+	var res surfaceConditionsResponse
+	var tagsJSON string
+	var detailJSON string
+	err := q.QueryRowContext(
+		ctx,
+		`SELECT computed_at, station_code, status, score, tags_json, summary, detail_json
+		   FROM surface_conditions
+		  WHERE id = 1`,
+	).Scan(&res.ComputedAt, &res.StationCode, &res.Status, &res.Score, &tagsJSON, &res.Summary, &detailJSON)
+	if err != nil {
+		return surfaceConditionsResponse{}, err
+	}
+	if err := json.Unmarshal([]byte(tagsJSON), &res.Tags); err != nil {
+		return surfaceConditionsResponse{}, err
+	}
+	if err := json.Unmarshal([]byte(detailJSON), &res.Detail); err != nil {
+		return surfaceConditionsResponse{}, err
+	}
+	return res, nil
+}
+
 func applyExpiryPolicies(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -656,4 +828,653 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write JSON failed: %v", err)
 	}
+}
+
+func (wr *weatherRefresher) Start(ctx context.Context) {
+	if wr.client == nil {
+		wr.client = &http.Client{Timeout: 10 * time.Second}
+	}
+	if wr.now == nil {
+		wr.now = time.Now
+	}
+	if wr.refreshInterval <= 0 {
+		wr.refreshInterval = 15 * time.Minute
+	}
+	if wr.dailyLookback <= 0 {
+		wr.dailyLookback = 7
+	}
+	if err := wr.refresh(ctx); err != nil {
+		log.Printf("weather refresh failed: %v", err)
+	}
+
+	ticker := time.NewTicker(wr.refreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := wr.refresh(ctx); err != nil {
+				log.Printf("weather refresh failed: %v", err)
+			}
+		}
+	}
+}
+
+func (wr *weatherRefresher) refresh(ctx context.Context) error {
+	if err := wr.fetchObservation(ctx); err != nil {
+		return err
+	}
+	if wr.dailyClimateID != "" {
+		for _, offset := range []int{0, -1} {
+			day := wr.now().UTC().AddDate(0, 0, offset)
+			if err := wr.fetchDaily(ctx, day); err != nil {
+				return err
+			}
+		}
+	}
+	return wr.recomputeSurface(ctx)
+}
+
+func (wr *weatherRefresher) fetchObservation(ctx context.Context) error {
+	url := wr.observationURL
+	if strings.TrimSpace(url) == "" {
+		url = fmt.Sprintf("https://weather.gc.ca/api/app/en/Observation?codes[]=%s", wr.stationCode)
+	}
+
+	payload, raw, err := fetchJSON(ctx, wr.client, url)
+	if err != nil {
+		return err
+	}
+
+	record, err := firstRecord(payload)
+	if err != nil {
+		return err
+	}
+	observedAt := firstString(record, "timeStamp", "timestamp", "observation_time", "observed_at", "observationTime", "dateTime", "date_time", "datetime", "date")
+	if observedAt == "" {
+		return errors.New("observation payload missing timestamp")
+	}
+	temperature, hasTemperature := firstFloat(record, "temperature", "temperature_c", "temp", "air_temperature")
+	dewPoint, hasDewPoint := firstFloat(record, "dewpoint", "dew_point", "dew_point_c", "dewpoint_c")
+	humidity, hasHumidity := firstInt(record, "humidity", "humidity_pct", "relative_humidity")
+	windKPH, hasWindKPH := firstFloat(record, "windSpeed", "wind", "wind_kph", "wind_speed")
+	windGustKPH, hasWindGustKPH := firstFloat(record, "windGust", "wind_gust", "wind_gust_kph", "gust", "gust_kph")
+	visibilityKM, hasVisibilityKM := firstFloat(record, "visibility", "visibility_km", "visUnround")
+	pressureKPA, hasPressureKPA := firstFloat(record, "pressure", "pressure_kpa")
+	conditionCode := firstString(record, "iconCode", "condition_code", "weather_code", "icon_code")
+	conditionText := firstString(record, "condition", "condition_text", "weather", "weather_condition", "wx_condition", "text_summary")
+	precip1h, hasPrecip1h := firstFloat(record, "precip_1h_mm", "precip1h", "precipitation_1h", "precipitation")
+
+	var temperatureValue any
+	if hasTemperature {
+		temperatureValue = temperature
+	}
+	var humidityValue any
+	if hasHumidity {
+		humidityValue = humidity
+	}
+	var precipValue any
+	if hasPrecip1h {
+		precipValue = precip1h
+	}
+
+	_, err = wr.db.ExecContext(
+		ctx,
+		`INSERT INTO weather_observations
+		 (observed_at, station_code, temperature_c, dew_point_c, humidity_pct, wind_kph, wind_gust_kph, visibility_km, pressure_kpa, condition_code, condition_text, precip_1h_mm, raw_json, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(observed_at) DO UPDATE SET
+		   station_code = excluded.station_code,
+		   temperature_c = excluded.temperature_c,
+		   dew_point_c = excluded.dew_point_c,
+		   humidity_pct = excluded.humidity_pct,
+		   wind_kph = excluded.wind_kph,
+		   wind_gust_kph = excluded.wind_gust_kph,
+		   visibility_km = excluded.visibility_km,
+		   pressure_kpa = excluded.pressure_kpa,
+		   condition_code = excluded.condition_code,
+		   condition_text = excluded.condition_text,
+		   precip_1h_mm = excluded.precip_1h_mm,
+		   raw_json = excluded.raw_json,
+		   fetched_at = excluded.fetched_at`,
+		observedAt,
+		wr.stationCode,
+		temperatureValue,
+		valueOrNil(hasDewPoint, dewPoint),
+		humidityValue,
+		valueOrNil(hasWindKPH, windKPH),
+		valueOrNil(hasWindGustKPH, windGustKPH),
+		valueOrNil(hasVisibilityKM, visibilityKM),
+		valueOrNil(hasPressureKPA, pressureKPA),
+		emptyToNil(conditionCode),
+		emptyToNil(conditionText),
+		precipValue,
+		string(raw),
+		wr.now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+func (wr *weatherRefresher) fetchDaily(ctx context.Context, day time.Time) error {
+	lookback := wr.dailyLookback
+	if lookback <= 0 {
+		lookback = 1
+	}
+
+	var payload any
+	var raw []byte
+	var err error
+	for offset := 0; offset < lookback; offset++ {
+		candidate := day.AddDate(0, 0, -offset)
+		url := fmt.Sprintf("https://api.weather.gc.ca/collections/climate-daily/items/%s.%d.%d.%d?f=json", wr.dailyClimateID, candidate.Year(), int(candidate.Month()), candidate.Day())
+		payload, raw, err = fetchJSON(ctx, wr.client, url)
+		if err == nil {
+			break
+		}
+		var statusErr *httpStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+			continue
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+
+	record, err := firstRecord(payload)
+	if err != nil {
+		return err
+	}
+	climateDate := firstString(record, "LOCAL_DATE", "climate_date", "date")
+	if climateDate == "" {
+		climateDate = day.Format("2006-01-02")
+	} else if len(climateDate) >= len("2006-01-02") {
+		climateDate = climateDate[:len("2006-01-02")]
+	}
+	minTemp, hasMinTemp := firstFloat(record, "MIN_TEMPERATURE", "min_temp_c", "min_temperature")
+	maxTemp, hasMaxTemp := firstFloat(record, "MAX_TEMPERATURE", "max_temp_c", "max_temperature")
+	totalRain, hasTotalRain := firstFloat(record, "TOTAL_RAIN", "total_rain_mm")
+	totalSnow, hasTotalSnow := firstFloat(record, "TOTAL_SNOW", "total_snow_cm")
+	totalPrecip, hasTotalPrecip := firstFloat(record, "TOTAL_PRECIPITATION", "total_precip_mm")
+	snowOnGround, hasSnowOnGround := firstFloat(record, "SNOW_ON_GROUND", "snow_on_ground_cm")
+	maxGust, hasMaxGust := firstFloat(record, "SPEED_MAX_GUST", "MAX_GUST_SPEED", "max_gust_kph")
+
+	_, err = wr.db.ExecContext(
+		ctx,
+		`INSERT INTO weather_daily
+		 (station_code, climate_date, min_temp_c, max_temp_c, total_rain_mm, total_snow_cm, total_precip_mm, snow_on_ground_cm, max_gust_kph, raw_json, fetched_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(station_code, climate_date) DO UPDATE SET
+		   min_temp_c = excluded.min_temp_c,
+		   max_temp_c = excluded.max_temp_c,
+		   total_rain_mm = excluded.total_rain_mm,
+		   total_snow_cm = excluded.total_snow_cm,
+		   total_precip_mm = excluded.total_precip_mm,
+		   snow_on_ground_cm = excluded.snow_on_ground_cm,
+		   max_gust_kph = excluded.max_gust_kph,
+		   raw_json = excluded.raw_json,
+		   fetched_at = excluded.fetched_at`,
+		wr.stationCode,
+		climateDate,
+		valueOrNil(hasMinTemp, minTemp),
+		valueOrNil(hasMaxTemp, maxTemp),
+		valueOrNil(hasTotalRain, totalRain),
+		valueOrNil(hasTotalSnow, totalSnow),
+		valueOrNil(hasTotalPrecip, totalPrecip),
+		valueOrNil(hasSnowOnGround, snowOnGround),
+		valueOrNil(hasMaxGust, maxGust),
+		string(raw),
+		wr.now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+func (wr *weatherRefresher) recomputeSurface(ctx context.Context) error {
+	observations, err := loadRecentObservations(ctx, wr.db, wr.stationCode, 12)
+	if err != nil {
+		return err
+	}
+	if len(observations) == 0 {
+		return nil
+	}
+	dailies, err := loadRecentDaily(ctx, wr.db, wr.stationCode, 2)
+	if err != nil {
+		return err
+	}
+
+	signal := deriveSurfaceConditions(wr.now().UTC(), wr.stationCode, observations, dailies)
+	tagsJSON, err := json.Marshal(signal.Tags)
+	if err != nil {
+		return err
+	}
+	detailJSON, err := json.Marshal(signal.Detail)
+	if err != nil {
+		return err
+	}
+
+	_, err = wr.db.ExecContext(
+		ctx,
+		`INSERT INTO surface_conditions
+		 (id, station_code, computed_at, status, score, tags_json, summary, detail_json)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   station_code = excluded.station_code,
+		   computed_at = excluded.computed_at,
+		   status = excluded.status,
+		   score = excluded.score,
+		   tags_json = excluded.tags_json,
+		   summary = excluded.summary,
+		   detail_json = excluded.detail_json`,
+		signal.StationCode,
+		signal.ComputedAt,
+		signal.Status,
+		signal.Score,
+		string(tagsJSON),
+		signal.Summary,
+		string(detailJSON),
+	)
+	return err
+}
+
+func loadRecentObservations(ctx context.Context, db *sql.DB, stationCode string, limit int) ([]weatherObservationRow, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT observed_at, COALESCE(temperature_c, 0), COALESCE(condition_text, ''), precip_1h_mm
+		   FROM weather_observations
+		  WHERE station_code = ?
+		  ORDER BY observed_at DESC
+		  LIMIT ?`,
+		stationCode,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]weatherObservationRow, 0, limit)
+	for rows.Next() {
+		var row weatherObservationRow
+		var precip sql.NullFloat64
+		if err := rows.Scan(&row.ObservedAt, &row.TemperatureC, &row.ConditionText, &precip); err != nil {
+			return nil, err
+		}
+		if precip.Valid {
+			row.Precip1hMM = precip.Float64
+			row.HasPrecip1h = true
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
+}
+
+func loadRecentDaily(ctx context.Context, db *sql.DB, stationCode string, limit int) ([]weatherDailyRow, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT climate_date, min_temp_c, max_temp_c, total_rain_mm, total_snow_cm, total_precip_mm, snow_on_ground_cm, max_gust_kph
+		   FROM weather_daily
+		  WHERE station_code = ?
+		  ORDER BY climate_date DESC
+		  LIMIT ?`,
+		stationCode,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]weatherDailyRow, 0, limit)
+	for rows.Next() {
+		var row weatherDailyRow
+		if err := rows.Scan(
+			&row.ClimateDate,
+			&row.MinTempC,
+			&row.MaxTempC,
+			&row.TotalRainMM,
+			&row.TotalSnowCM,
+			&row.TotalPrecipMM,
+			&row.SnowOnGroundCM,
+			&row.MaxGustKPH,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+func deriveSurfaceConditions(now time.Time, stationCode string, observations []weatherObservationRow, dailies []weatherDailyRow) surfaceConditionsResponse {
+	latest := observations[len(observations)-1]
+	earliest := observations[0]
+	tempsAboveZero := 0
+	hadPrecip := false
+	sawSnowText := false
+	sawRainText := false
+	for _, obs := range observations {
+		if obs.TemperatureC > 0 {
+			tempsAboveZero++
+		}
+		if obs.HasPrecip1h && obs.Precip1hMM > 0 {
+			hadPrecip = true
+		}
+		condition := strings.ToLower(obs.ConditionText)
+		if strings.Contains(condition, "snow") || strings.Contains(condition, "ice pellets") {
+			sawSnowText = true
+		}
+		if strings.Contains(condition, "rain") || strings.Contains(condition, "drizzle") {
+			sawRainText = true
+		}
+	}
+
+	snowpackCM := 0.0
+	snowpackKnown := false
+	dayMaxTemp := 0.0
+	dayMinTemp := 0.0
+	if len(dailies) > 0 {
+		for _, daily := range dailies {
+			if daily.SnowOnGroundCM.Valid && daily.SnowOnGroundCM.Float64 > snowpackCM {
+				snowpackCM = daily.SnowOnGroundCM.Float64
+				snowpackKnown = true
+			}
+		}
+		if dailies[0].MaxTempC.Valid {
+			dayMaxTemp = dailies[0].MaxTempC.Float64
+		}
+		if dailies[0].MinTempC.Valid {
+			dayMinTemp = dailies[0].MinTempC.Float64
+		}
+	}
+
+	tempTrend := latest.TemperatureC - earliest.TemperatureC
+	nearFreezing := latest.TemperatureC >= -1 && latest.TemperatureC <= 2
+	meltingWet := snowpackKnown && snowpackCM > 0 && latest.TemperatureC > 0 && tempsAboveZero >= 1
+	slushy := nearFreezing && (hadPrecip || sawSnowText || sawRainText)
+	flashRefreeze := meltingWet && latest.TemperatureC <= 1 && tempTrend < 0
+	icyLikely := latest.TemperatureC <= 0 && (meltingWet || (snowpackKnown && snowpackCM > 0 && tempTrend < 0))
+	packedSnow := snowpackKnown && snowpackCM > 0 && latest.TemperatureC < 0 && !hadPrecip && !meltingWet
+	freshSnow := sawSnowText
+
+	tags := make([]string, 0, 6)
+	score := 0
+	if freshSnow {
+		tags = append(tags, "fresh_snow")
+		score += 2
+	}
+	if slushy {
+		tags = append(tags, "slushy")
+		score += 2
+	}
+	if meltingWet {
+		tags = append(tags, "melting_wet")
+		score += 3
+	}
+	if flashRefreeze {
+		tags = append(tags, "flash_refreeze_risk")
+		score += 4
+	}
+	if icyLikely {
+		tags = append(tags, "icy_likely")
+		score += 3
+	}
+	if packedSnow {
+		tags = append(tags, "packed_snow_likely")
+		score += 2
+	}
+	if len(tags) == 0 {
+		tags = append(tags, "clear_or_drying")
+	}
+
+	status := "clear_or_drying"
+	summary := "No strong snow-surface signal detected."
+	switch {
+	case flashRefreeze:
+		status = "flash_refreeze_risk"
+		summary = "Snowpack is melting now; wet surfaces may freeze as temperatures fall."
+	case icyLikely:
+		status = "icy_likely"
+		summary = "Recent thaw and falling temperatures suggest icy spots are likely."
+	case meltingWet:
+		status = "melting_wet"
+		summary = "Snow on the ground is thawing and likely leaving standing water or runoff."
+	case slushy:
+		status = "slushy"
+		summary = "Near-freezing precipitation suggests slushy surfaces."
+	case freshSnow:
+		status = "fresh_snow"
+		summary = "Recent snowfall likely leaves fresh accumulation on untreated surfaces."
+	case packedSnow:
+		status = "packed_snow_likely"
+		summary = "Cold temperatures with existing snowpack suggest packed snow remains."
+	}
+
+	detail := map[string]any{
+		"observation_count":      len(observations),
+		"latest_observed_at":     latest.ObservedAt,
+		"temperature_c":          latest.TemperatureC,
+		"condition_text":         latest.ConditionText,
+		"temp_trend_window_c":    tempTrend,
+		"temps_above_zero_count": tempsAboveZero,
+		"snow_on_ground_cm":      valueOrZero(snowpackKnown, snowpackCM),
+		"snowpack_known":         snowpackKnown,
+		"daily_max_temp_c":       valueOrZero(len(dailies) > 0 && dailies[0].MaxTempC.Valid, dayMaxTemp),
+		"daily_min_temp_c":       valueOrZero(len(dailies) > 0 && dailies[0].MinTempC.Valid, dayMinTemp),
+		"derived_at":             now.Format(time.RFC3339),
+	}
+
+	return surfaceConditionsResponse{
+		ComputedAt:  now.Format(time.RFC3339),
+		StationCode: stationCode,
+		Status:      status,
+		Score:       score,
+		Tags:        tags,
+		Summary:     summary,
+		Detail:      detail,
+	}
+}
+
+func fetchJSON(ctx context.Context, client *http.Client, url string) (any, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return nil, nil, &httpStatusError{
+			StatusCode: res.StatusCode,
+			URL:        url,
+			Body:       strings.TrimSpace(string(body)),
+		}
+	}
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, nil, err
+	}
+	return payload, raw, nil
+}
+
+func firstRecord(payload any) (map[string]any, error) {
+	switch t := payload.(type) {
+	case []any:
+		for _, item := range t {
+			if rec := unwrapRecord(item); rec != nil {
+				return rec, nil
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"observations", "items", "data", "results", "features"} {
+			value, ok := t[key]
+			if !ok {
+				continue
+			}
+			switch items := value.(type) {
+			case []any:
+				for _, item := range items {
+					if rec := unwrapRecord(item); rec != nil {
+						return rec, nil
+					}
+				}
+			case map[string]any:
+				if rec := unwrapRecord(items); rec != nil {
+					return rec, nil
+				}
+			}
+		}
+		if rec := unwrapRecord(t); rec != nil {
+			return rec, nil
+		}
+	}
+	return nil, errors.New("no record found in weather payload")
+}
+
+func unwrapRecord(v any) map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if properties, ok := m["properties"].(map[string]any); ok {
+		return properties
+	}
+	for _, key := range []string{"observation", "item"} {
+		if nested, ok := m[key].(map[string]any); ok {
+			return nested
+		}
+	}
+	return m
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			if s, ok := valueAsString(value); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func firstFloat(m map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			if f, ok := valueAsFloat(value); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func firstInt(m map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			if i, ok := valueAsInt(value); ok {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func valueAsString(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), true
+	case json.Number:
+		return t.String(), true
+	case map[string]any:
+		for _, key := range []string{"value", "text", "metric", "english", "label", "en"} {
+			if nested, ok := t[key]; ok {
+				if s, ok := valueAsString(nested); ok {
+					return s, true
+				}
+			}
+		}
+	case []any:
+		if len(t) > 0 {
+			return valueAsString(t[0])
+		}
+	}
+	return "", false
+}
+
+func valueAsFloat(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(s, 64)
+		return f, err == nil
+	case map[string]any:
+		for _, key := range []string{"value", "metric", "celsius", "amount"} {
+			if nested, ok := t[key]; ok {
+				if f, ok := valueAsFloat(nested); ok {
+					return f, true
+				}
+			}
+		}
+	case []any:
+		if len(t) > 0 {
+			return valueAsFloat(t[0])
+		}
+	}
+	return 0, false
+}
+
+func valueAsInt(v any) (int, bool) {
+	if f, ok := valueAsFloat(v); ok {
+		return int(f), true
+	}
+	return 0, false
+}
+
+func emptyToNil(s string) any {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	return strings.TrimSpace(s)
+}
+
+func valueOrNil(ok bool, v float64) any {
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+func valueOrZero(ok bool, v float64) any {
+	if !ok {
+		return nil
+	}
+	return v
 }
