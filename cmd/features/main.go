@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -1471,65 +1472,102 @@ func loadFeatureCollection(ctx context.Context, path, saveDir, saveName, itemID 
 	return fc, nil
 }
 
+// These are variables so tests can point download at a local server.
+var (
+	hubDownloadURL       = "https://hub.arcgis.com/api/download/v1/items/%s/geojson?redirect=false&layers=0&spatialRefId=4326"
+	downloadTimeout      = 5 * time.Minute
+	downloadPollInterval = 5 * time.Second
+	downloadMaxBackoff   = time.Minute
+)
+
+var errExportFailed = errors.New("export failed")
+
+// download waits for the Hub to export itemID as GeoJSON and returns the
+// export's body. Errors, such as a non-2xx status from the Hub or from the
+// result URL, are retried with backoff until downloadTimeout. A failed export
+// is returned right away.
 func download(ctx context.Context, itemID string) (io.ReadCloser, error) {
-	downloadURL := fmt.Sprintf("https://hub.arcgis.com/api/download/v1/items/%s/geojson?redirect=false&layers=0&spatialRefId=4326", itemID)
+	downloadURL := fmt.Sprintf(hubDownloadURL, itemID)
 
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(downloadTimeout)
+	backoff := downloadPollInterval
 
-	var resultURL string
+	var lastErr error
 	for time.Now().Before(deadline) {
-		u, err := func() (string, error) {
-			req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
-			if err != nil {
-				return "", fmt.Errorf("creating request: %w", err)
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return "", fmt.Errorf("executing request: %w", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode/100 != 2 {
-				return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-			}
-
-			b, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return "", fmt.Errorf("reading body: %w", err)
-			}
-
-			var body struct {
-				ResultURL string `json:"resultUrl"`
-			}
-			if err := json.Unmarshal(b, &body); err != nil {
-				return "", fmt.Errorf("unmarshaling body: %w", err)
-			}
-
-			return body.ResultURL, nil
-		}()
-		if err != nil {
-			return nil, fmt.Errorf("downloading data: %w", err)
+		rc, err := downloadAttempt(ctx, downloadURL)
+		if rc != nil {
+			return rc, nil
 		}
-		if u == "" {
+
+		wait := downloadPollInterval
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case errors.Is(err, errExportFailed):
+			return nil, fmt.Errorf("downloading %s: %w", itemID, err)
+		case err != nil:
+			lastErr = err
+			wait = backoff
+			backoff = min(2*backoff, downloadMaxBackoff)
+			log.Printf("downloading %s: %v, retrying in %v", itemID, err, wait)
+		default:
 			log.Printf("waiting for %s export", itemID)
-			select {
-			case <-time.After(5 * time.Second):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			continue
 		}
-		resultURL = u
-		break
+
+		select {
+		case <-time.After(min(wait, time.Until(deadline))):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
-	if resultURL == "" {
-		return nil, fmt.Errorf("timed out waiting for %s export", itemID)
+	if lastErr != nil {
+		return nil, fmt.Errorf("timed out waiting for %s export: %w", itemID, lastErr)
+	}
+	return nil, fmt.Errorf("timed out waiting for %s export", itemID)
+}
+
+// downloadAttempt checks on the export once. If it's ready, it starts
+// downloading the result and returns its body. If it's still being
+// generated, it returns nil and no error.
+func downloadAttempt(ctx context.Context, downloadURL string) (io.ReadCloser, error) {
+	resp, err := httpGet(ctx, downloadURL)
+	if err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("reading body: %w", err)
 	}
 
-	log.Println("downloading from", resultURL)
+	var body struct {
+		Status    string `json:"status"`
+		Message   string `json:"message"`
+		ResultURL string `json:"resultUrl"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		return nil, fmt.Errorf("unmarshaling body: %w", err)
+	}
+	switch body.Status {
+	case "Failed", "CompletedWithErrors":
+		return nil, fmt.Errorf("%w: status %s: %s", errExportFailed, body.Status, body.Message)
+	}
+	if body.ResultURL == "" {
+		return nil, nil
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", resultURL, nil)
+	log.Println("downloading from", body.ResultURL)
+
+	resp, err = httpGet(ctx, body.ResultURL)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+func httpGet(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -1537,7 +1575,12 @@ func download(ctx context.Context, itemID string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
-	return resp.Body, nil
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		resp.Body.Close()
+		return nil, fmt.Errorf("unexpected status code %d from %s: %s", resp.StatusCode, url, strings.TrimSpace(string(b)))
+	}
+	return resp, nil
 }
 
 type pointXY struct {
